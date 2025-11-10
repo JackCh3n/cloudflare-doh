@@ -119,17 +119,14 @@ Worker 可以使用默认配置直接部署使用。
 
 ## 赞助商
 
-感谢以下服务提供商的支持:
-
-[AdGuard Private](https://www.adguardprivate.com) - 提供企业级 DNS 解析服务
+[宁屏去广告](https://www.nullprivate.com) - 可定制化个人 DNS 解析服务
 
 主要特性:
 
-- 无限制的 DNS 查询请求
-- 增强的隐私保护机制
 - 智能广告及追踪器过滤
-- 灵活的 DNS 记录配置
-- 内置动态 DNS (DDNS) 支持
-- 专业的技术支持
+- 内置DDNS 支持
+- 防沉迷配置
+- 支持按规则路由上游DNS
 
-详情请访问 [AdGuard Private](https://www.adguardprivate.com) 了解更多。
+详情请访问 [Null Private](https://www.nullprivate.com) 了解更多。
+
