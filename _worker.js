@@ -23,6 +23,12 @@ const DEFAULT_PATH_MAPPINGS = {
 		"pathMapping": {
 			"/query-dns": "/dns-query"
 		}
+	},
+	"/adguard": {
+		"targetDomain": "dns.adguard-dns.com",
+		"pathMapping": {
+			"/query-dns": "/dns-query"
+		}
 	}
 	// Add more path mappings as needed
 };
