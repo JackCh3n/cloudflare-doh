@@ -39,6 +39,10 @@
 
 > 地址写法：下面用的是显式路径 `https://doh.example.com/cloudflare/query-dns`。
 > 2026-10-31 起，`https://doh.example.com`、`/dns-query`、`/query-dns` 也都能直接用（自动走 `DEFAULT_UPSTREAM`，默认 cloudflare），所以只想要一个上游时填 `https://doh.example.com/dns-query` 就够了。
+>
+> 备用入口：同一台 Worker 还绑了 `https://doh2.example.com`，证书、能力完全一致。
+> 若你所在网络解析 `example.com` 有问题（实测部分网络会拿到 AAAA 但 IPv6 不通），把上面所有 `doh.example.com` 换成 `doh2.example.com` 即可。
+> **不要把两个域名的同一条规则同时填进 AGH**——`upstream_mode: parallel` 会对同一查询发两遍，纯属浪费。
 
 ```
 # ============ 国内：直连国内 DoH ============
@@ -180,3 +184,30 @@ https://doh.example.com/cloudflare/query-dns
 223.5.5.5
 119.29.29.29
 ```
+
+## 七、双入口与 DNS 生效注意事项
+
+同一台 Worker `cloudflare-doh` 现在绑了两个域名：
+
+| 入口 | 证书 | 用途 |
+| --- | --- | --- |
+| `doh.example.com` | 主 | 日常使用 |
+| `doh2.example.com` | 备 | 某些网络解析 `example.com` 异常时切换 |
+
+两者走同一个 Worker、同一份 `ALLOWED_HOSTS` 白名单、同一套缓存策略，路径写法完全一致，替换域名即可。
+
+### 新增域名后「本地解析不了」通常不是没生效
+
+2026-10-31 在 108 上踩过一次：Worker 已绑定并签好证书，但 108 上的 `curl` 仍报 `Could not resolve host`。
+原因不是 DNS 没生效，而是**本机 AdGuard Home 缓存了绑定之前的 NODATA 负结果**（`test2.example.com` 的 SOA minimum 是 1800 秒）：
+
+```bash
+# 108 上看到的：NOERROR 但 0 条 answer，AUTHORITY 里的 SOA TTL 还在倒计时
+dig @127.0.0.1 doh2.example.com
+# 换公共 DNS 直查是正常的
+dig +short A doh2.example.com @8.8.8.8      # → 203.0.113.1 203.0.113.2
+# 绕过 DNS 直连，验证服务本身没问题
+curl --resolve doh2.example.com:443:203.0.113.1 https://doh2.example.com/
+```
+
+处理办法：AGH 界面「清除缓存」，或等负缓存 TTL 到期；验证服务可用性时用 `--resolve` 绕过本地解析。

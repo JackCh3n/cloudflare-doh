@@ -150,7 +150,7 @@ npx wrangler deploy
 	"routes": [{ "pattern": "doh.example.com", "custom_domain": true }],
 	"cache": { "enabled": true },  // Workers Cache（需要 wrangler ≥ 4.69）
 	"vars": {
-		"ALLOWED_HOSTS": "doh.example.com",
+		"ALLOWED_HOSTS": "doh.example.com,doh2.example.com",
 		"CACHE_TTL": "30"
 	}
 }
@@ -166,7 +166,7 @@ npx wrangler deploy
 
 | 项 | 值 |
 | --- | --- |
-| 唯一入口 | `https://doh.example.com` |
+| 入口 | 主：`https://doh.example.com`　备：`https://doh2.example.com`（同一 Worker，两份证书） |
 | workers.dev | 已关闭（API 回读 `enabled: false, previews_enabled: false`） |
 | 版本预览 URL | 已关闭 |
 | 旧 Pages 项目 | 已删除（`cloudflare-doh-5s9.pages.dev` 已 NXDOMAIN） |
@@ -338,6 +338,7 @@ node scripts/check-doh.mjs --host my-app.edgeone.dev --cookie "eo_token=xxx; eo_
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
+| 1.0.11 | 2026-10-31 | 新增备用入口 `doh2.example.com`（同一 Worker 双域名 + 双证书），ALLOWED_HOSTS 同步；docs 补双入口说明与「新增域名后本地解析不了多为 AGH 负缓存」的排查记录 |
 | 1.0.10 | 2026-10-31 | AGH 国内上游统一改为腾讯 doh.pub（去掉阿里），108 实测 qq.com / game.qq.com / pvp.qq.com 均返回腾讯云 CDN 就近节点 |
 | 1.0.9 | 2026-10-31 | 兼容裸路径：根路径 / 与 /dns-query、/query-dns 均可作为 DoH 端点（仅当请求头为 DoH 协议时转发，浏览器访问仍是伪装 404），新增 DEFAULT_UPSTREAM；docs/adguard-home.md 补 108 实机排查记录 |
 | 1.0.8 | 2026-10-31 | 新增 docs/adguard-home.md：google/cloudflare 延迟实测（cloudflare 更快）、国内直连与绕 Worker 对比、含腾讯游戏的完整分流清单；README 精简为结论 + 链接 |

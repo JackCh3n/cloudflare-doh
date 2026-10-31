@@ -20,8 +20,11 @@
 	"preview_urls": false,
 
 	// 绑定的自定义域名（custom_domain 会自动创建 DNS 记录与证书）
-	// 只保留这一个入口：workers.dev、版本预览域名、Pages 均已关闭/删除
-	"routes": [{ "pattern": "doh.example.com", "custom_domain": true }],
+	// doh.example.com 为主入口；doh2.example.com 为备用入口（部分网络解析 example.com 有问题时可切换）
+	"routes": [
+		{ "pattern": "doh.example.com", "custom_domain": true },
+		{ "pattern": "doh2.example.com", "custom_domain": true }
+	],
 
 	// Workers Cache：命中时不再执行 Worker，省 CPU、降延迟
 	// 注意：响应未带 Cache-Control 时会按 RFC 9111 启发式缓存（200 缓存 2 小时），
@@ -32,8 +35,8 @@
 	},
 
 	"vars": {
-		// 只允许这个域名访问，其余（含任何 workers.dev/pages.dev 遗留域名）返回伪装 404
-		"ALLOWED_HOSTS": "doh.example.com",
+		// 只允许这些域名访问，其余（含任何 workers.dev/pages.dev 遗留域名）返回伪装 404
+		"ALLOWED_HOSTS": "doh.example.com,doh2.example.com",
 		// 裸 /dns-query 走哪家上游（标准 DoH 客户端常直接请求该路径）
 		"DEFAULT_UPSTREAM": "cloudflare",
 		// GET + Accept: application/dns-message 的缓存秒数；0 表示完全不缓存
