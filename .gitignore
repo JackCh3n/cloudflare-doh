@@ -174,3 +174,6 @@ dist
 
 # EdgeOne 构建产物与本地凭据（不要提交）
 .edgeone/
+
+# 本地工作区数据（记忆/缓存）
+.workbuddy/
