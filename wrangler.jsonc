@@ -1,47 +1,46 @@
 /**
- * For more details on how to configure Wrangler, refer to:
- * https://developers.cloudflare.com/workers/wrangler/configuration/
+ * Cloudflare Worker 配置
+ * 文档：https://developers.cloudflare.com/workers/wrangler/configuration/
+ *
+ * 本文件对应「Worker 部署」路径（比 Pages 多了 Workers Cache 与入口收敛能力）：
+ *   - workers_dev: false   关闭 *.workers.dev 测试域名
+ *   - preview_urls: false  关闭版本预览域名（*.workers.dev 的 preview alias）
+ *   - routes + custom_domain 只保留绑定的自定义域名
+ *   - cache.enabled        启用 Workers Cache（响应必须自带 Cache-Control，见 src/core.js cachePolicy）
+ *   - vars.ALLOWED_HOSTS   应用层二次校验，非绑定域名的请求直接返回伪装 404
  */
 {
 	"$schema": "node_modules/wrangler/config-schema.json",
 	"name": "cloudflare-doh",
 	"main": "_worker.js",
 	"compatibility_date": "2025-03-11",
+
+	// 关闭测试/预览域名，只允许绑定域名访问
+	"workers_dev": false,
+	"preview_urls": false,
+
+	// 绑定的自定义域名（custom_domain 会自动创建 DNS 记录与证书）
+	"routes": [
+		{ "pattern": "doh.example.com", "custom_domain": true },
+		{ "pattern": "fuckdns.test2.example.com", "custom_domain": true }
+	],
+
+	// Workers Cache：命中时不再执行 Worker，省 CPU、降延迟
+	// 注意：响应未带 Cache-Control 时会按 RFC 9111 启发式缓存（200 缓存 2 小时），
+	// 因此 src/core.js 对所有响应显式声明策略，默认 no-store，仅 GET+DoH 二进制按 CACHE_TTL 短缓存
+	// 如需跨版本共享缓存，升级 wrangler 到 4.107+ 后加 "cross_version_cache": true
+	"cache": {
+		"enabled": true
+	},
+
+	"vars": {
+		// 只允许这两个域名访问，其余（含任何 workers.dev/pages.dev 遗留域名）返回伪装 404
+		"ALLOWED_HOSTS": "doh.example.com,fuckdns.test2.example.com",
+		// GET + Accept: application/dns-message 的缓存秒数；0 表示完全不缓存
+		"CACHE_TTL": "30"
+	},
+
 	"observability": {
 		"enabled": true
 	}
-	/**
-	 * Smart Placement
-	 * Docs: https://developers.cloudflare.com/workers/configuration/smart-placement/#smart-placement
-	 */
-	// "placement": { "mode": "smart" },
-
-	/**
-	 * Bindings
-	 * Bindings allow your Worker to interact with resources on the Cloudflare Developer Platform, including
-	 * databases, object storage, AI inference, real-time communication and more.
-	 * https://developers.cloudflare.com/workers/runtime-apis/bindings/
-	 */
-
-	/**
-	 * Environment Variables
-	 * https://developers.cloudflare.com/workers/wrangler/configuration/#environment-variables
-	 */
-	// "vars": { "MY_VARIABLE": "production_value" },
-	/**
-	 * Note: Use secrets to store sensitive data.
-	 * https://developers.cloudflare.com/workers/configuration/secrets/
-	 */
-
-	/**
-	 * Static Assets
-	 * https://developers.cloudflare.com/workers/static-assets/binding/
-	 */
-	// "assets": { "directory": "./public/", "binding": "ASSETS" },
-
-	/**
-	 * Service Bindings (communicate between multiple Workers)
-	 * https://developers.cloudflare.com/workers/wrangler/configuration/#service-bindings
-	 */
-	// "services": [{ "binding": "MY_SERVICE", "service": "my-service" }]
 }

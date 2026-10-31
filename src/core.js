@@ -108,6 +108,54 @@ export const HOMEPAGE_HTML = `<!DOCTYPE html>
 const DROPPED_REQUEST_HEADERS = ['host', 'content-length'];
 
 /**
+ * 读取主机白名单
+ * 配置 ALLOWED_HOSTS（逗号分隔）后，只允许这些 Host 访问，
+ * 其余（例如 *.workers.dev、*.pages.dev、预览域名）一律返回伪装 404。
+ * @param {Object} [env]
+ * @returns {string[]|null} null 表示不限制
+ */
+export function getAllowedHosts(env) {
+	const raw = env && env.ALLOWED_HOSTS;
+	if (!raw) return null;
+	const list = Array.isArray(raw) ? raw : String(raw).split(',');
+	const hosts = list.map((h) => String(h).trim().toLowerCase()).filter(Boolean);
+	return hosts.length > 0 ? hosts : null;
+}
+
+/**
+ * 判断本次请求的 Host 是否在白名单内
+ * @param {string} hostname
+ * @param {Object} [env]
+ * @returns {boolean}
+ */
+export function isHostAllowed(hostname, env) {
+	const hosts = getAllowedHosts(env);
+	if (!hosts) return true;
+	return hosts.includes(String(hostname).toLowerCase());
+}
+
+/**
+ * 计算响应的缓存策略
+ *
+ * Workers Cache 开启后，响应若不带 Cache-Control 会走 RFC 9111 启发式缓存
+ * （200 默认缓存 2 小时），对 DoH 是灾难，因此这里对每条响应都显式声明：
+ *   - 仅 GET + Accept: application/dns-message + CACHE_TTL>0 才允许短缓存
+ *   - 其余（含所有 POST、伪装 404）一律 no-store
+ * @param {Request} request
+ * @param {Object} [env]
+ * @returns {{value: string, vary: boolean}}
+ */
+export function cachePolicy(request, env) {
+	const ttl = Number((env && env.CACHE_TTL) || 0);
+	const method = (request.method || 'GET').toUpperCase();
+	const accept = request.headers.get('accept') || '';
+	if (method === 'GET' && Number.isFinite(ttl) && ttl > 0 && accept.includes('application/dns-message')) {
+		return { value: `public, max-age=${Math.floor(ttl)}`, vary: true };
+	}
+	return { value: 'no-store', vary: false };
+}
+
+/**
  * 读取路径映射配置
  * 优先使用环境变量 DOMAIN_MAPPINGS（JSON 字符串或对象），否则回退默认值
  * @param {Object} [env] 平台环境变量对象（Cloudflare env / EdgeOne context.env）
@@ -182,7 +230,11 @@ export function resolveTarget(url, env) {
 export function camoResponse() {
 	return new Response(HOMEPAGE_HTML, {
 		status: 404,
-		headers: { 'Content-Type': 'text/html; charset=utf-8' },
+		headers: {
+			'Content-Type': 'text/html; charset=utf-8',
+			// 显式禁止缓存：否则 Workers Cache 会按启发式给 404 缓存 3 分钟
+			'Cache-Control': 'no-store',
+		},
 	});
 }
 
@@ -212,6 +264,13 @@ function forwardableHeaders(headers) {
 export async function proxyRequest(request, options = {}) {
 	const { env, fetchImpl = fetch } = options;
 	const url = new URL(request.url);
+
+	// 主机白名单：未配置则放行；配置后只有绑定域名可用，
+	// workers.dev / pages.dev / 预览域名都会被这条挡住
+	if (!isHostAllowed(url.hostname, env)) {
+		return camoResponse();
+	}
+
 	const target = resolveTarget(url, env);
 
 	if (!target) {
@@ -233,12 +292,30 @@ export async function proxyRequest(request, options = {}) {
 		}
 	}
 
-	return fetchImpl(target.targetUrl, init);
+	const upstream = await fetchImpl(target.targetUrl, init);
+
+	// 显式声明缓存策略（Workers Cache 开启后必需，见 cachePolicy 注释）
+	const policy = cachePolicy(request, env);
+	const headers = new Headers(upstream.headers);
+	headers.set('Cache-Control', policy.value);
+	if (policy.vary) {
+		const vary = headers.get('Vary');
+		headers.set('Vary', vary ? `${vary}, Accept` : 'Accept');
+	}
+
+	return new Response(upstream.body, {
+		status: upstream.status,
+		statusText: upstream.statusText,
+		headers,
+	});
 }
 
 export default {
 	resolveTarget,
 	getPathMappings,
+	getAllowedHosts,
+	isHostAllowed,
+	cachePolicy,
 	proxyRequest,
 	camoResponse,
 	HOMEPAGE_HTML,

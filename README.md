@@ -81,6 +81,16 @@ cloudflare-doh/
 
 ## 配置
 
+### 环境变量一览
+
+| 变量 | 作用 | 默认 |
+| --- | --- | --- |
+| `DOMAIN_MAPPINGS` | 覆盖整张路径映射表（JSON 字符串或对象） | 内置 6 家 |
+| `ALLOWED_HOSTS` | 允许访问的 Host 白名单，逗号分隔；配置后其余域名一律返回伪装 404 | 不限制 |
+| `CACHE_TTL` | `GET + application/dns-message` 响应的缓存秒数；`0` 表示完全不缓存 | `0` |
+
+Cloudflare 侧写在 `wrangler.jsonc` 的 `vars`（或控制台「变量和机密」）；EdgeOne 侧写在项目根目录 `.env`。
+
 ### 方式一：环境变量 `DOMAIN_MAPPINGS`（不重新发版）
 
 格式为 JSON（对象或 JSON 字符串均可）：
@@ -115,6 +125,47 @@ npx wrangler deploy
 ```
 
 或登录 [Cloudflare 控制台](https://dash.cloudflare.com/) 创建 Worker，把 `_worker.js` 与 `src/core.js` 一并粘贴/上传后部署。
+
+生产部署建议直接用仓库里的 `wrangler.jsonc`（已经按「只允许绑定域名 + 启用 Workers Cache」配好）：
+
+```jsonc
+{
+	"name": "cloudflare-doh",
+	"main": "_worker.js",
+	"workers_dev": false,          // 关闭 *.workers.dev 测试域名
+	"preview_urls": false,         // 关闭版本预览域名
+	"routes": [
+		{ "pattern": "doh.example.com", "custom_domain": true },
+		{ "pattern": "fuckdns.test2.example.com", "custom_domain": true }
+	],
+	"cache": { "enabled": true },  // Workers Cache（需要 wrangler ≥ 4.69）
+	"vars": {
+		"ALLOWED_HOSTS": "doh.example.com,fuckdns.test2.example.com",
+		"CACHE_TTL": "30"
+	}
+}
+```
+
+三层「只允许绑定域名」的保障：
+
+1. `workers_dev: false` + `preview_urls: false` —— 平台层面不生成 `*.workers.dev` 与版本预览域名
+2. `routes` 只声明 `custom_domain` —— Worker 只在这两个域名上被触发
+3. `ALLOWED_HOSTS` —— 应用层再校验一次 Host，不是绑定域名的请求直接返回伪装 404（防止旧域名/误绑定漏进来）
+
+#### Workers Cache 的两个坑（本仓库已规避）
+
+- **没写 `Cache-Control` 不等于不缓存**：未设置时按 RFC 9111 启发式缓存，`200` 会被缓存 **2 小时**，`404` 缓存 3 分钟。对 DoH 是灾难，所以 `src/core.js` 对每条响应都显式声明策略：默认 `no-store`，只有 `GET + Accept: application/dns-message + CACHE_TTL>0` 才给 `public, max-age=N` 并附加 `Vary: Accept`。
+- **POST 永远不进缓存**：AdGuard Home 用 POST 发 DoH 查询，所以缓存对它没有收益；`CACHE_TTL` 只对浏览器/GET 客户端有效。想让 AGH 也受益就得改成 HTTP/3 或 DoH GET，本仓库不做。
+
+验证缓存是否真的生效（第二次请求 Worker 不再执行，日志里没有新行）：
+
+```bash
+npx wrangler tail
+curl -s -o /dev/null -D - -H 'accept: application/dns-message' \
+  'https://doh.example.com/google/query-dns?dns=AAABAAABAAAAAAAAA3d3dwdleGFtcGxlA2NvbQAAAQAB' | grep -i 'cf-cache-status\|cache-control'
+```
+
+> 如需跨版本共享缓存（部署后不重置命中率），升级 wrangler 到 4.107+ 后在 `cache` 里加 `"cross_version_cache": true`。
 
 ### 二、Cloudflare Pages
 
@@ -266,6 +317,7 @@ node scripts/check-doh.mjs --host my-app.edgeone.dev --cookie "eo_token=xxx; eo_
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
+| 1.0.6 | 2026-10-31 | 新增 `ALLOWED_HOSTS`（只允许绑定域名访问）与 `CACHE_TTL`（Workers Cache 显式缓存策略）；wrangler 配置关闭 workers_dev 与 preview_urls 并启用 `cache.enabled`；README 补充 Worker 生产配置与缓存两个坑 |
 | 1.0.5 | 2026-10-31 | 新增 `scripts/check-doh.mjs` 线上自检脚本（真实 DoH 查询 + 解析 A 记录）；用 `qq.com` / `test2.example.com` 复测三个站点六家上游，README 实测表改为真实域名结果 |
 | 1.0.4 | 2026-10-31 | 补记国际版手动上传站点（`doh-preview.edgeone.dev`）实测结果：中间件被正确识别，Google / AdGuard / doh.pub / AliDNS 可达，Quad9 不可达、Cloudflare 不稳定 |
 | 1.0.3 | 2026-10-31 | 新增 `npm run pack:edgeone` 生成 3 文件手动上传目录 `dist/edgeone`（已在 EdgeOne 实测部署通过），README 补充控制台直接上传与国际版说明 |

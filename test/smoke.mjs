@@ -155,10 +155,80 @@ await check('POST 转发保留二进制请求体与 content-type', async () => {
 	assert.deepEqual(Array.from(new Uint8Array(init.body)), [0x00, 0x01, 0x02, 0xff]);
 });
 
-await check('上游响应原样返回（状态码与响应体不被改写）', async () => {
+await check('上游响应状态码、响应体、content-type 保留', async () => {
 	const upstream = new Response('dns-binary', { status: 200, headers: { 'content-type': 'application/dns-message' } });
 	const response = await proxyRequest(new Request('https://x.dev/google/query-dns?name=a.com'), { fetchImpl: createFetchStub(upstream) });
-	assert.equal(response, upstream);
+	assert.equal(response.status, 200);
+	assert.equal(response.headers.get('content-type'), 'application/dns-message');
+	assert.equal(await response.text(), 'dns-binary');
+});
+
+await check('默认给上游响应加 no-store（避免 Workers Cache 启发式缓存 2 小时）', async () => {
+	const upstream = new Response('{}', { status: 200, headers: { 'content-type': 'application/dns-json' } });
+	const response = await proxyRequest(new Request('https://x.dev/google/query-dns?name=a.com'), { fetchImpl: createFetchStub(upstream) });
+	assert.equal(response.headers.get('cache-control'), 'no-store');
+});
+
+await check('伪装 404 带 no-store', async () => {
+	const response = await proxyRequest(new Request('https://x.dev/unknown'), { fetchImpl: () => { throw new Error('不应发起请求'); } });
+	assert.equal(response.status, 404);
+	assert.equal(response.headers.get('cache-control'), 'no-store');
+});
+
+await check('CACHE_TTL>0 时仅缓存 GET + dns-message，并带 Vary: Accept', async () => {
+	const stub = createFetchStub(new Response('bin', { status: 200, headers: { 'content-type': 'application/dns-message' } }));
+	const env = { CACHE_TTL: '30' };
+	const cached = await proxyRequest(
+		new Request('https://x.dev/google/query-dns?dns=abc', { headers: { accept: 'application/dns-message' } }),
+		{ env, fetchImpl: stub }
+	);
+	assert.equal(cached.headers.get('cache-control'), 'public, max-age=30');
+	assert.match(cached.headers.get('vary') || '', /Accept/i);
+
+	const notCached = await proxyRequest(new Request('https://x.dev/google/query-dns?name=a.com', { headers: { accept: 'application/dns-json' } }), {
+		env,
+		fetchImpl: stub,
+	});
+	assert.equal(notCached.headers.get('cache-control'), 'no-store');
+});
+
+await check('POST 永不缓存（即使 CACHE_TTL>0）', async () => {
+	const stub = createFetchStub(new Response('bin', { status: 200 }));
+	const response = await proxyRequest(
+		new Request('https://x.dev/google/query-dns', {
+			method: 'POST',
+			headers: { accept: 'application/dns-message', 'content-type': 'application/dns-message' },
+			body: new Uint8Array([1, 2, 3]),
+		}),
+		{ env: { CACHE_TTL: '30' }, fetchImpl: stub }
+	);
+	assert.equal(response.headers.get('cache-control'), 'no-store');
+});
+
+await check('ALLOWED_HOSTS 命中时正常转发', async () => {
+	const stub = createFetchStub();
+	await proxyRequest(new Request('https://doh.example.com/google/query-dns?name=a.com'), {
+		env: { ALLOWED_HOSTS: 'doh.example.com, FuckDNS.Nobige.cn ' },
+		fetchImpl: stub,
+	});
+	assert.equal(stub.calls.length, 1);
+});
+
+await check('ALLOWED_HOSTS 未命中的域名（如 pages.dev）返回伪装 404 且不转发', async () => {
+	const response = await proxyRequest(new Request('https://cloudflare-doh-5s9.pages.dev/google/query-dns?name=a.com'), {
+		env: { ALLOWED_HOSTS: 'doh.example.com' },
+		fetchImpl: () => {
+			throw new Error('不应发起请求');
+		},
+	});
+	assert.equal(response.status, 404);
+	assert.match(await response.text(), /无法访问此网站/);
+});
+
+await check('未配置 ALLOWED_HOSTS 时不限制域名', async () => {
+	const stub = createFetchStub();
+	await proxyRequest(new Request('https://whatever.workers.dev/google/query-dns?name=a.com'), { env: {}, fetchImpl: stub });
+	assert.equal(stub.calls.length, 1);
 });
 
 await check('Cloudflare 入口可调用且透传 env', async () => {
