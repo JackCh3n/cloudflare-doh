@@ -69,6 +69,7 @@ cloudflare-doh/
 | --- | --- | --- | --- | --- | --- | --- |
 | EdgeOne `-a global`（大陆边缘，自定义域名 `dohcn.example.com`） | ❌ 504 | ❌ 504 | ❌ 504 | ❌ 504 | ✅ 200 | ✅ 200 |
 | EdgeOne `-a overseas`（海外节点 `203.0.113.30`） | ✅ 200 | ⚠️ 不稳定（`/query-dns` 有响应，`/` 504） | ❌ 502 BAD_GATEWAY | ✅ 200 | ✅ 200 | ✅ 200 |
+| EdgeOne 国际版（控制台手动上传 `dist/edgeone`，`.edgeone.dev`） | ✅ 200 | ⚠️ 不稳定（400 与 504 交替） | ❌ 平台错误页 | ✅ 200 | ✅ 200 | ✅ 200 |
 
 判定方法：能取到上游自身的响应（HTML/JSON/二进制）记为可用；返回 EdgeOne 的 `502 BAD_GATEWAY` / `504 GATEWAY_TIMEOUT` 错误页记为不可达。
 
@@ -244,6 +245,7 @@ edgeone makers deploy -e preview   # 部署到预览环境验证
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
+| 1.0.4 | 2026-10-31 | 补记国际版手动上传站点（`doh-preview.edgeone.dev`）实测结果：中间件被正确识别，Google / AdGuard / doh.pub / AliDNS 可达，Quad9 不可达、Cloudflare 不稳定 |
 | 1.0.3 | 2026-10-31 | 新增 `npm run pack:edgeone` 生成 3 文件手动上传目录 `dist/edgeone`（已在 EdgeOne 实测部署通过），README 补充控制台直接上传与国际版说明 |
 | 1.0.2 | 2026-10-31 | 新增 `-a overseas` 海外区域站点（`cloudflare-doh-overseas` / `makers-demo2`）并实测各上游可达性；README 补充双区域部署与项目 ID 对照 |
 | 1.0.1 | 2026-10-31 | 新增 `/dnspod`（doh.pub）、`/alidns`（dns.alidns.com）国内可达映射；补充 EdgeOne 大陆边缘的出网实测结论与 AdGuard Home 配置说明 |
