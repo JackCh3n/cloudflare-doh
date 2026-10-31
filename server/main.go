@@ -9,13 +9,14 @@
 // 环境变量：
 //
 //	LISTEN_ADDR       监听地址，默认 :8080
+//	TLS_LISTEN        额外的 TLS 监听地址（如 :8444）；留空则 -tls-cert 生效时直接把 LISTEN_ADDR 变成 HTTPS
 //	DOMAIN_MAPPINGS   覆盖整张映射表（JSON，字段同 Worker 版）
 //	ALLOWED_HOSTS     允许的 Host，逗号分隔；为空表示不限制
 //	DEFAULT_UPSTREAM  裸路径默认上游，默认 cloudflare
 //	CACHE_TTL         GET+application/dns-message 的缓存秒数，默认 0（不缓存）
 //	VERBOSE=1         打印每条请求日志
 //	HEALTH_PATH       健康检查路径，默认空（关闭）
-//	TLS_CERT/TLS_KEY  同时监听 HTTPS 时使用（EdgeOne 回源可只用 HTTP）
+//	TLS_CERT/TLS_KEY  证书与私钥路径；配置后按上面的规则启用 HTTPS
 package main
 
 import (
@@ -373,6 +374,7 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 
 func main() {
 	addr := flag.String("listen", envOr("LISTEN_ADDR", ":8080"), "监听地址，如 :8080")
+	tlsAddr := flag.String("tls-listen", os.Getenv("TLS_LISTEN"), "额外的 TLS 监听地址，如 :8444（留空则把 -listen 变成 HTTPS）")
 	certFile := flag.String("tls-cert", os.Getenv("TLS_CERT"), "TLS 证书路径（可选）")
 	keyFile := flag.String("tls-key", os.Getenv("TLS_KEY"), "TLS 私钥路径（可选）")
 	flag.Parse()
@@ -380,25 +382,49 @@ func main() {
 	cfg := loadConfig()
 	srv := newServer(cfg)
 
-	httpServer := &http.Server{
-		Addr:              *addr,
-		Handler:           srv,
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       120 * time.Second,
+	hasTLS := *certFile != "" && *keyFile != ""
+	plainAddr, secureAddr := *addr, ""
+	switch {
+	case hasTLS && *tlsAddr != "":
+		secureAddr = *tlsAddr // 双监听：HTTP + HTTPS
+	case hasTLS:
+		plainAddr, secureAddr = "", *addr // 单监听：-listen 直接变 HTTPS
 	}
 
-	log.Printf("doh-proxy 启动：listen=%s upstreams=%d allowed_hosts=%d default=%s cache_ttl=%d",
-		*addr, len(cfg.Mappings), len(cfg.AllowedHosts), cfg.DefaultUpstream, cfg.CacheTTL)
-
-	errCh := make(chan error, 1)
-	go func() {
-		if *certFile != "" && *keyFile != "" {
-			log.Printf("启用 HTTPS")
-			errCh <- httpServer.ListenAndServeTLS(*certFile, *keyFile)
-			return
+	newHTTPServer := func(a string) *http.Server {
+		return &http.Server{
+			Addr:              a,
+			Handler:           srv,
+			ReadHeaderTimeout: 10 * time.Second,
+			IdleTimeout:       120 * time.Second,
 		}
-		errCh <- httpServer.ListenAndServe()
-	}()
+	}
+
+	servers := make([]*http.Server, 0, 2)
+	errCh := make(chan error, 2)
+
+	if plainAddr != "" {
+		s := newHTTPServer(plainAddr)
+		servers = append(servers, s)
+		go func() {
+			log.Printf("HTTP  监听 %s", plainAddr)
+			errCh <- s.ListenAndServe()
+		}()
+	}
+	if secureAddr != "" {
+		s := newHTTPServer(secureAddr)
+		servers = append(servers, s)
+		go func() {
+			log.Printf("HTTPS 监听 %s（cert=%s）", secureAddr, *certFile)
+			errCh <- s.ListenAndServeTLS(*certFile, *keyFile)
+		}()
+	}
+	if len(servers) == 0 {
+		log.Fatalf("没有可用的监听地址")
+	}
+
+	log.Printf("doh-proxy 启动：upstreams=%d allowed_hosts=%d default=%s cache_ttl=%d",
+		len(cfg.Mappings), len(cfg.AllowedHosts), cfg.DefaultUpstream, cfg.CacheTTL)
 
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
@@ -412,8 +438,10 @@ func main() {
 		log.Printf("收到信号 %s，开始优雅退出", sig)
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
-		if err := httpServer.Shutdown(ctx); err != nil {
-			log.Printf("关闭超时: %v", err)
+		for _, s := range servers {
+			if err := s.Shutdown(ctx); err != nil {
+				log.Printf("关闭 %s 超时: %v", s.Addr, err)
+			}
 		}
 	}
 }

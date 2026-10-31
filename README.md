@@ -284,14 +284,15 @@ GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o doh-proxy .
 # 上传 + systemd（详见 server/README.md）
 ```
 
-已在腾讯云日本节点（`203.0.113.10:8080`）上线，客户端在中国大陆实测：
+已在腾讯云日本节点上线，并前置 **EdgeOne 加速**（加速域名 `dohj.example.com`，源站 HTTPS `203.0.113.10:8080`，自签证书 10 年）。上海客户端实测（POST 真实查询）：
 
-| 目标 | 8 次耗时 |
+| 目标 | 耗时 |
 | --- | --- |
-| 日本源站直连 `http://203.0.113.10:8080/cloudflare/query-dns` | 0.106–0.120s（非常稳定） |
-| Cloudflare Worker `https://doh.example.com/cloudflare/query-dns` | 0.885–3.706s（波动大） |
+| `https://dohj.example.com/cloudflare/query-dns`（EdgeOne → 日本） | 5 次 **0.171–0.216s**，非常稳定 |
+| `https://doh.example.com/cloudflare/query-dns`（Cloudflare Worker） | 8 次 0.63–2.17s，波动大 |
+| `https://203.0.113.10:8080/...`（直连源站，绕过 EdgeOne） | 约 0.27s，抖动 0.28–1.35s |
 
-EdgeOne 加速侧只需填四个值：源站 `203.0.113.10`、协议 `HTTP`、端口 `8080`、加速域名（备案后可用大陆节点）。完整步骤与注意事项见 **[server/README.md](server/README.md)**。
+EdgeOne 侧配置：源站 `203.0.113.10`、协议 **HTTPS**、端口 `8080`、回源 Host 同加速域名；源站用自签证书即可（EdgeOne 不校验源站证书）。注意若回源协议选 HTTPS 而源站没 TLS，会直接 525。完整步骤见 **[server/README.md](server/README.md)**。
 
 一键部署脚本：`scripts\deploy-jp.bat`（需先 `set JP_SSH_PASS=...`）。
 
@@ -366,6 +367,7 @@ node scripts/check-doh.mjs --host my-app.edgeone.dev --cookie "eo_token=xxx; eo_
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
+| 1.1.1 | 2026-10-31 | Go 版新增双监听（HTTP + TLS，）；日本节点启用自签 10 年证书（CN=dohj.example.com）并前置 EdgeOne 加速，上海侧 0.171–0.216s 稳定；修复 EdgeOne 回源 525；Host 白名单收紧至 dohj.example.com + 源站 IP |
 | 1.1.0 | 2026-10-31 | 新增 Go 版实现 `server/`（单文件、仅标准库、含单元测试）并部署到腾讯云日本节点 203.0.113.10:8080（systemd 托管）；源站直连实测 0.106–0.120s，远优于 Cloudflare Worker 的 0.885–3.706s；新增 scripts/deploy-jp.bat 与 scripts/doh-proxy.service |
 | 1.0.11 | 2026-10-31 | 新增备用入口 `doh2.example.com`（同一 Worker 双域名 + 双证书），ALLOWED_HOSTS 同步；docs 补双入口说明与「新增域名后本地解析不了多为 AGH 负缓存」的排查记录 |
 | 1.0.10 | 2026-10-31 | AGH 国内上游统一改为腾讯 doh.pub（去掉阿里），108 实测 qq.com / game.qq.com / pvp.qq.com 均返回腾讯云 CDN 就近节点 |

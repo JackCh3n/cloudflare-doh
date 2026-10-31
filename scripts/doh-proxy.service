@@ -6,16 +6,20 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-ExecStart=/opt/doh-proxy/doh-proxy -listen :8080
+
+# 配了证书时 -listen 直接变 HTTPS（EdgeOne 走 HTTPS 回源）；
+# 想同时保留 HTTP，再加 -tls-listen :8444 变成双监听。
+ExecStart=/opt/doh-proxy/doh-proxy -listen :8080 -tls-cert /opt/doh-proxy/tls/dohj.crt -tls-key /opt/doh-proxy/tls/dohj.key
 
 # 上游与路径映射沿用 Worker 版默认值，需要改映射就设 DOMAIN_MAPPINGS（JSON 字符串）
 Environment=LISTEN_ADDR=:8080
 Environment=DEFAULT_UPSTREAM=cloudflare
 Environment=CACHE_TTL=30
 Environment=HEALTH_PATH=/healthz
-# EdgeOne 加速域名定下来后，把域名填进来即可只允许该域名访问，例如：
-# Environment=ALLOWED_HOSTS=doh2.example.com
-Environment=ALLOWED_HOSTS=
+Environment=TLS_CERT=/opt/doh-proxy/tls/dohj.crt
+Environment=TLS_KEY=/opt/doh-proxy/tls/dohj.key
+# 只允许 EdgeOne 加速域名与源站 IP 访问（伪造 Host 会拿到伪装 404）
+Environment=ALLOWED_HOSTS=dohj.example.com,203.0.113.10
 
 Restart=always
 RestartSec=2
