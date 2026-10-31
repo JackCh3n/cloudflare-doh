@@ -68,16 +68,17 @@ cloudflare-doh/
 
 | 站点 | google | cloudflare | quad9 | adguard | dnspod | alidns |
 | --- | --- | --- | --- | --- | --- | --- |
-| `dohcn.example.com`（`-a global`，大陆边缘） | ❌ 504 | ❌ 504 | ❌ 504 | ❌ 504 | ✅ 2/2 | ✅ 2/2 |
-| `-a overseas`（203.0.113.30） | ✅ 2/2 | ⚠️ 1/2（qq 通过，test2 504） | ❌ 502/505 | ✅ 2/2 | ✅ 2/2 | ✅ 2/2 |
-| 国际版（`.edgeone.dev`） | ✅ 2/2 | ⚠️ 1/2（qq 504，test2 通过） | ❌ 505/502 | ✅ 2/2 | ✅ 2/2 | ✅ 2/2 |
+| **Cloudflare Worker（`doh.example.com`）** | ✅ 2/2 | ✅ 2/2 | ✅ 2/2 | ✅ 2/2 | ✅ 2/2 | ✅ 2/2 |
+| `dohcn.example.com`（EdgeOne `-a global`，大陆边缘） | ❌ 504 | ❌ 504 | ❌ 504 | ❌ 504 | ✅ 2/2 | ✅ 2/2 |
+| EdgeOne `-a overseas`（203.0.113.30） | ✅ 2/2 | ⚠️ 1/2（qq 通过，test2 504） | ❌ 502/505 | ✅ 2/2 | ✅ 2/2 | ✅ 2/2 |
+| EdgeOne 国际版（`.edgeone.dev`） | ✅ 2/2 | ⚠️ 1/2（qq 504，test2 通过） | ❌ 505/502 | ✅ 2/2 | ✅ 2/2 | ✅ 2/2 |
 
 参照值（同一批查询的真实应答）：
 
 - `qq.com` → `123.150.76.218`、`203.205.254.157`、`113.108.81.189`（腾讯网）
 - `test2.example.com` → `76.76.21.21` / `76.76.21.103` / `76.76.21.104` / `76.76.21.123` / `76.76.21.164`（Vercel）
 
-结论：**Quad9 在 EdgeOne 三个站点全军覆没，Cloudflare 约一半成功率**（且不同站点失败的域名还不一样），这两家不建议放进 AdGuard Home 上游；Google / AdGuard 只在海外站点可用；dnspod / alidns 三个站点都稳，其中大陆边缘最快（120–280ms，海外节点绕一圈约 0.6–3.5s，含每次新建 TLS 握手）。
+结论：**Cloudflare Worker 是唯一六家上游全通的部署方式**（12/12，实测 1.0–3.1s，含 TLS 握手）。EdgeOne 侧三家都有短板：Quad9 全军覆没、Cloudflare 约一半成功率（且各站失败的域名还不一样）、Google / AdGuard 只在海外节点可用；只有 dnspod / alidns 在哪都稳。所以：**要全功能就用 Worker，EdgeOne 那套适合只跑国内上游的场景。**
 
 ## 配置
 
@@ -134,13 +135,10 @@ npx wrangler deploy
 	"main": "_worker.js",
 	"workers_dev": false,          // 关闭 *.workers.dev 测试域名
 	"preview_urls": false,         // 关闭版本预览域名
-	"routes": [
-		{ "pattern": "doh.example.com", "custom_domain": true },
-		{ "pattern": "fuckdns.test2.example.com", "custom_domain": true }
-	],
+	"routes": [{ "pattern": "doh.example.com", "custom_domain": true }],
 	"cache": { "enabled": true },  // Workers Cache（需要 wrangler ≥ 4.69）
 	"vars": {
-		"ALLOWED_HOSTS": "doh.example.com,fuckdns.test2.example.com",
+		"ALLOWED_HOSTS": "doh.example.com",
 		"CACHE_TTL": "30"
 	}
 }
@@ -149,8 +147,20 @@ npx wrangler deploy
 三层「只允许绑定域名」的保障：
 
 1. `workers_dev: false` + `preview_urls: false` —— 平台层面不生成 `*.workers.dev` 与版本预览域名
-2. `routes` 只声明 `custom_domain` —— Worker 只在这两个域名上被触发
+2. `routes` 只声明 `custom_domain` —— Worker 只在这一个域名上被触发
 3. `ALLOWED_HOSTS` —— 应用层再校验一次 Host，不是绑定域名的请求直接返回伪装 404（防止旧域名/误绑定漏进来）
+
+当前生产状态（2026-10-31 从 Pages 迁移到 Worker 完成）：
+
+| 项 | 值 |
+| --- | --- |
+| 唯一入口 | `https://doh.example.com` |
+| workers.dev | 已关闭（API 回读 `enabled: false, previews_enabled: false`） |
+| 版本预览 URL | 已关闭 |
+| 旧 Pages 项目 | 已删除（`cloudflare-doh-5s9.pages.dev` 已 NXDOMAIN） |
+| Workers Cache | 已启用，`GET + application/dns-message` 实测 `MISS` → `HIT`，`Cache-Control: public, max-age=30` |
+| POST 行为 | `Cache-Control: no-store`，不进缓存 |
+| 六家上游实测 | 12/12 全通（`qq.com` / `test2.example.com`），见下方矩阵 |
 
 #### Workers Cache 的两个坑（本仓库已规避）
 
@@ -168,6 +178,8 @@ curl -s -o /dev/null -D - -H 'accept: application/dns-message' \
 > 如需跨版本共享缓存（部署后不重置命中率），升级 wrangler 到 4.107+ 后在 `cache` 里加 `"cross_version_cache": true`。
 
 ### 二、Cloudflare Pages
+
+> 本项目原先部署在 Pages，2026-10-31 已迁移到 Worker。Pages 有两个硬限制：`*.pages.dev` 无法关闭、也用不了 Workers Cache，因此只建议作为备选（或不想迁移时的临时方案）。
 
 1. Fork 本库
 2. 控制台 → Workers and Pages → 创建 → Pages → 连接到 Git → 选择 Fork 库
@@ -317,6 +329,7 @@ node scripts/check-doh.mjs --host my-app.edgeone.dev --cookie "eo_token=xxx; eo_
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
+| 1.0.7 | 2026-10-31 | 迁移完成：删除 Pages 项目与旧域名，Worker 以 custom_domain 绑定唯一入口 `doh.example.com`，workers.dev 与版本预览关闭，Workers Cache 实测 MISS→HIT，六家上游 12/12 全通 |
 | 1.0.6 | 2026-10-31 | 新增 `ALLOWED_HOSTS`（只允许绑定域名访问）与 `CACHE_TTL`（Workers Cache 显式缓存策略）；wrangler 配置关闭 workers_dev 与 preview_urls 并启用 `cache.enabled`；README 补充 Worker 生产配置与缓存两个坑 |
 | 1.0.5 | 2026-10-31 | 新增 `scripts/check-doh.mjs` 线上自检脚本（真实 DoH 查询 + 解析 A 记录）；用 `qq.com` / `test2.example.com` 复测三个站点六家上游，README 实测表改为真实域名结果 |
 | 1.0.4 | 2026-10-31 | 补记国际版手动上传站点（`doh-preview.edgeone.dev`）实测结果：中间件被正确识别，Google / AdGuard / doh.pub / AliDNS 可达，Quad9 不可达、Cloudflare 不稳定 |
