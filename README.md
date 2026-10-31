@@ -65,10 +65,12 @@ cloudflare-doh/
 
 | 部署位置 | dns.google | one.one.one.one | dns.quad9.net | dns.adguard-dns.com | doh.pub | dns.alidns.com |
 | --- | --- | --- | --- | --- | --- | --- |
-| 腾讯 EdgeOne 中国站（大陆边缘） | ❌ 504 | ❌ 504 | ❌ 504 | ❌ 504 | ✅ 200 | ✅ 200 |
-| 腾讯 EdgeOne 预览域名（海外边缘） | ✅ 200 | — | — | — | — | — |
+| EdgeOne `-a global`（大陆边缘，自定义域名 `dohcn.example.com`） | ❌ 504 | ❌ 504 | ❌ 504 | ❌ 504 | ✅ 200 | ✅ 200 |
+| EdgeOne `-a overseas`（海外节点 `203.0.113.30`） | ✅ 200 | ⚠️ 不稳定（`/query-dns` 有响应，`/` 504） | ❌ 502 BAD_GATEWAY | ✅ 200 | ✅ 200 | ✅ 200 |
 
-结论：**部署在大陆边缘时只能用 `/dnspod`、`/alidns`**；要访问 Google / Cloudflare / Quad9 / AdGuard 的 DoH，请部署到 Cloudflare Workers（或其海外区域），这两类是不同用途的部署，不要混用。
+判定方法：能取到上游自身的响应（HTML/JSON/二进制）记为可用；返回 EdgeOne 的 `502 BAD_GATEWAY` / `504 GATEWAY_TIMEOUT` 错误页记为不可达。
+
+结论：**大陆边缘只能用 `/dnspod`、`/alidns`**；要访问 Google / AdGuard 的 DoH，用 `-a overseas` 的海外站点（或部署到 Cloudflare Workers），两类部署不要混用。
 
 ## 配置
 
@@ -128,6 +130,22 @@ edgeone makers deploy -n cloudflare-doh -t <API_TOKEN> --json
 
 部署完成后 CLI 会输出形如 `https://<项目>-<hash>.edgeone.cool?eo_token=...&eo_time=...` 的地址，**预览域名必须带完整 `eo_token` 查询参数**才能访问（缺参数会被网关 302 到登录页）。长期使用请绑定已备案的自定义域名。
 
+#### 区域（`-a/--area`）：`global`（默认，含中国大陆）与 `overseas`（仅海外）
+
+```bash
+# 中国大陆 + 海外节点（域名后缀 .edgeone.cool）—— 大陆节点只能访问国内上游
+edgeone makers deploy -n cloudflare-doh          -a global   -t <TOKEN> --json
+# 仅海外节点（域名后缀 .edgeone.dev）—— 可访问 Google 等海外上游
+edgeone makers deploy -n cloudflare-doh-overseas -a overseas -t <TOKEN> --json
+```
+
+| 项目 | area | ProjectId | 预览域名 |
+| --- | --- | --- | --- |
+| `cloudflare-doh` | global | `makers-demo1` | `*.edgeone.cool` |
+| `cloudflare-doh-overseas` | overseas | `makers-demo2` | `*.edgeone.dev` |
+
+> `.edgeone/project.json` 只记录**最后一次**部署的项目，切换目标时务必显式带 `-n`（和 `-a`），否则会部署到上一次的项目。`.edgeone/` 已被 git 忽略。
+
 线上验证记录（2026-10-31）：
 
 - `GET /` → 伪装 404 页面（中间件正常执行）
@@ -153,10 +171,12 @@ AdGuard Home 的 DoH 上游语法就是 `https://域名/路径`，它会以 `POS
 https://dohcn.example.com/dnspod/query-dns
 https://dohcn.example.com/alidns/query-dns
 
-# 部署在 Cloudflare Workers —— 可用海外上游
-https://doh.example.com/google/query-dns
-https://doh.example.com/cloudflare/query-dns
+# 部署在 EdgeOne 海外站点（-a overseas）或 Cloudflare Workers —— 可用海外上游
+https://doh-global.example.com/google/query-dns
+https://doh-global.example.com/adguard/query-dns
 ```
+
+> 同一个子域名只能绑定一个项目：想同时保留国内与海外两套，请给海外站点单独绑一个子域名（海外区域不要求 ICP 备案，证书签发更快）。
 
 「Bootstrap DNS 服务器」必须填明文 DNS（AdGuard Home 要靠它解析代理域名本身，不能用自己的 DoH 上游）：
 
@@ -197,6 +217,7 @@ edgeone makers deploy -e preview   # 部署到预览环境验证
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
+| 1.0.2 | 2026-10-31 | 新增 `-a overseas` 海外区域站点（`cloudflare-doh-overseas` / `makers-demo2`）并实测各上游可达性；README 补充双区域部署与项目 ID 对照 |
 | 1.0.1 | 2026-10-31 | 新增 `/dnspod`（doh.pub）、`/alidns`（dns.alidns.com）国内可达映射；补充 EdgeOne 大陆边缘的出网实测结论与 AdGuard Home 配置说明 |
 | 1.0.0 | 2026-10-31 | 抽取 `src/core.js` 共享核心，新增腾讯 EdgeOne Pages 中间件入口，冒烟测试替代原 vitest 模板测试 |
 
