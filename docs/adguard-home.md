@@ -37,12 +37,12 @@
 
 ## 二、推荐配置（方案 A：速度优先，直接粘贴到「上游 DNS 服务器」）
 
-> 地址写法：下面用的是显式路径 `https://doh.example.com/cloudflare/query-dns`。
-> 2026-10-31 起，`https://doh.example.com`、`/dns-query`、`/query-dns` 也都能直接用（自动走 `DEFAULT_UPSTREAM`，默认 cloudflare），所以只想要一个上游时填 `https://doh.example.com/dns-query` 就够了。
+> 地址写法：国内走腾讯 `dns.pub`；国外走 **EdgeOne 加速的日本节点** `https://dohj.example.com`（2026-10-31 起 108 生产在用）。
+> `https://dohj.example.com`、`/dns-query`、`/query-dns` 也能直接用（自动走 `DEFAULT_UPSTREAM`，默认 cloudflare）。
 >
-> 备用入口：同一台 Worker 还绑了 `https://doh2.example.com`，证书、能力完全一致。
-> 若你所在网络解析 `example.com` 有问题（实测部分网络会拿到 AAAA 但 IPv6 不通），把上面所有 `doh.example.com` 换成 `doh2.example.com` 即可。
-> **不要把两个域名的同一条规则同时填进 AGH**——`upstream_mode: parallel` 会对同一查询发两遍，纯属浪费。
+> 备用入口：Cloudflare Worker 的 `https://doh.example.com` 与 `https://doh2.example.com` 仍可用，路径与 dohj 一致，
+> 但更慢（108 实测：dohj 0.23–0.33s，example.com 0.60–3.09s）。**不要把两个域名的同一条规则同时填进 AGH**——
+> `upstream_mode: parallel` 会对同一查询发两遍，纯属浪费。
 
 ```
 # ============ 国内：直连国内 DoH ============
@@ -69,15 +69,15 @@
 [/12306.cn/*.12306.cn/ctrip.com/*.ctrip.com/ly.com/*.ly.com/]https://dns.pub/dns-query
 [/xiaomi.com/*.xiaomi.com/mi.com/*.mi.com/huawei.com/*.huawei.com/honor.com/*.honor.com/]https://dns.pub/dns-query
 
-# ============ 国外：走自己的 Worker ============
-[/cloudfront.net/*.cloudfront.net/akamaihd.net/*.akamaihd.net/akamaized.net/*.akamaized.net/fastly.net/*.fastly.net/]https://doh.example.com/cloudflare/query-dns
-[/github.com/*.github.com/githubusercontent.com/*.githubusercontent.com/]https://doh.example.com/cloudflare/query-dns
-[/google.com/*.google.com/gstatic.com/*.gstatic.com/googleapis.com/*.googleapis.com/youtube.com/*.youtube.com/ytimg.com/*.ytimg.com/]https://doh.example.com/cloudflare/query-dns
-[/steamcommunity.com/*.steamcommunity.com/steampowered.com/*.steampowered.com/steamstatic.com/*.steamstatic.com/steamcontent.com/*.steamcontent.com/]https://doh.example.com/cloudflare/query-dns
+# ============ 国外：走 EdgeOne 加速的日本节点 ============
+[/cloudfront.net/*.cloudfront.net/akamaihd.net/*.akamaihd.net/akamaized.net/*.akamaized.net/fastly.net/*.fastly.net/]https://dohj.example.com/cloudflare/query-dns
+[/github.com/*.github.com/githubusercontent.com/*.githubusercontent.com/]https://dohj.example.com/cloudflare/query-dns
+[/google.com/*.google.com/gstatic.com/*.gstatic.com/googleapis.com/*.googleapis.com/youtube.com/*.youtube.com/ytimg.com/*.ytimg.com/]https://dohj.example.com/cloudflare/query-dns
+[/steamcommunity.com/*.steamcommunity.com/steampowered.com/*.steampowered.com/steamstatic.com/*.steamstatic.com/steamcontent.com/*.steamcontent.com/]https://dohj.example.com/cloudflare/query-dns
 
 # ============ 默认（未命中上面任何规则）============
-https://doh.example.com/cloudflare/query-dns
-https://doh.example.com/google/query-dns
+https://dohj.example.com/cloudflare/query-dns
+https://dohj.example.com/google/query-dns
 ```
 
 **Bootstrap DNS 服务器**（必须填明文，AGH 要靠它解析上面的域名）：
@@ -162,28 +162,48 @@ POST /adguard/query-dns    → 200, 72B, 0.90s
 浏览器 GET /               → 404 text/html（伪装页，按设计）
 ```
 
-### 108 建议的上游写法
+### 108 正在使用的上游写法（2026-10-31 已应用）
 
 ```
-# 国内直连（108 实测 dns.pub 0.18s；qq.com / game.qq.com / pvp.qq.com 均返回腾讯云 CDN 就近节点）
-[/*.cn/]https://doh.pub/dns-query
-[/qq.com/*.qq.com/tencent.com/*.tencent.com/tencentgames.com/*.tencentgames.com/]https://doh.pub/dns-query
-[/myqcloud.com/*.myqcloud.com/qcloud.com/*.qcloud.com/gtimg.cn/*.gtimg.cn/qpic.cn/*.qpic.cn/]https://doh.pub/dns-query
-[/bilibili.com/*.bilibili.com/hdslb.com/*.hdslb.com/]https://doh.pub/dns-query
-[/microsoft.com/*.microsoft.com/]https://doh.pub/dns-query
+# ===== 国内：腾讯 dns.pub 直连 =====
+[/*.cn/]https://dns.pub/dns-query
+[/qq.com/*.qq.com/tencent.com/*.tencent.com/tencentgames.com/*.tencentgames.com/ieg.qq.com/wetest.net/*.wetest.net/]https://dns.pub/dns-query
+[/myqcloud.com/*.myqcloud.com/qcloud.com/*.qcloud.com/tencent-cloud.com/*.tencent-cloud.com/gtimg.cn/*.gtimg.cn/qpic.cn/*.qpic.cn/weixin.qq.com/wechat.com/*.wechat.com/]https://dns.pub/dns-query
+[/bilibili.com/*.bilibili.com/hdslb.com/*.hdslb.com/bilivideo.com/*.bilivideo.com/]https://dns.pub/dns-query
+[/microsoft.com/*.microsoft.com/windowsupdate.com/*.windowsupdate.com/]https://dns.pub/dns-query
+[/baidu.com/*.baidu.com/bdstatic.com/*.bdstatic.com/bdimg.com/*.bdimg.com/]https://dns.pub/dns-query
+[/bytedance.com/*.bytedance.com/douyin.com/*.douyin.com/toutiao.com/*.toutiao.com/byteimg.com/*.byteimg.com/feishu.cn/*.feishu.cn/]https://dns.pub/dns-query
+[/163.com/*.163.com/126.net/*.126.net/netease.com/*.netease.com/]https://dns.pub/dns-query
+[/aliyun.com/*.aliyun.com/taobao.com/*.taobao.com/tmall.com/*.tmall.com/alipay.com/*.alipay.com/alicdn.com/*.alicdn.com/]https://dns.pub/dns-query
+[/jd.com/*.jd.com/meituan.com/*.meituan.com/pinduoduo.com/*.pinduoduo.com/zhihu.com/*.zhihu.com/weibo.com/*.weibo.com/kuaishou.com/*.kuaishou.com/xiaohongshu.com/*.xiaohongshu.com/]https://dns.pub/dns-query
+[/iqiyi.com/*.iqiyi.com/youku.com/*.youku.com/xiaomi.com/*.xiaomi.com/mi.com/*.mi.com/huawei.com/*.huawei.com/honor.com/*.honor.com/]https://dns.pub/dns-query
+[/12306.cn/*.12306.cn/ctrip.com/*.ctrip.com/ly.com/*.ly.com/]https://dns.pub/dns-query
 
-# 国外走自己的 Worker
-[/cloudfront.net/*.cloudfront.net/akamaihd.net/*.akamaihd.net/]https://doh.example.com/cloudflare/query-dns
-[/github.com/*.github.com/steamcommunity.com/steampowered.com/*.steampowered.com/]https://doh.example.com/cloudflare/query-dns
-[/google.com/*.google.com/youtube.com/*.youtube.com/]https://doh.example.com/cloudflare/query-dns
+# ===== 国外：走 EdgeOne 加速的日本节点 =====
+[/cloudfront.net/*.cloudfront.net/akamaihd.net/*.akamaihd.net/akamaized.net/*.akamaized.net/fastly.net/*.fastly.net/]https://dohj.example.com/cloudflare/query-dns
+[/github.com/*.github.com/githubusercontent.com/*.githubusercontent.com/steamcommunity.com/steampowered.com/*.steampowered.com/steamstatic.com/*.steamstatic.com/]https://dohj.example.com/cloudflare/query-dns
+[/google.com/*.google.com/gstatic.com/*.gstatic.com/googleapis.com/*.googleapis.com/youtube.com/*.youtube.com/ytimg.com/*.ytimg.com/]https://dohj.example.com/cloudflare/query-dns
 
-# 默认
-https://doh.example.com/cloudflare/query-dns
+# ===== 默认（未命中的国外域名）=====
+https://dohj.example.com/cloudflare/query-dns
+https://dohj.example.com/google/query-dns
 
 # Bootstrap（只留 IPv4，108 没有 IPv6）
 223.5.5.5
 119.29.29.29
 ```
+
+应用结果（108，AGH v0.107.79）：
+
+| 域名 | 走哪条 | 实测 |
+| --- | --- | --- |
+| `qq.com` | dns.pub | 26ms，113.108.81.189 / 123.150.76.218 |
+| `www.bilibili.com` | dns.pub | 77ms，走 `a.w.bilicdn1.com` |
+| `github.com` | dohj → cloudflare | 27ms，20.27.177.113 |
+| `steamcommunity.com` | dohj → cloudflare | 110ms，23.35.100.199 |
+| `www.google.com` | dohj → cloudflare | 201ms，142.251.15x |
+
+改配置流程（NAS 上没有 init 脚本，只能重启进程）：备份 yaml → `AdGuardHome --check-config` 校验 → 停旧进程 → 用原命令行 `setsid` 重启 → dig 自检，失败自动回滚。备份文件：`/vol1/@appdata/AdGuardHome/AdGuardHome.yaml.bak-20261031`。
 
 ## 七、双入口与 DNS 生效注意事项
 

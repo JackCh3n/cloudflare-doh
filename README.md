@@ -304,12 +304,15 @@ AdGuard Home 的 DoH 上游语法就是 `https://域名/路径`，它会以 `POS
 
 核心结论（HTTP/2 keep-alive 实测 15 次）：**国外域名走 `/cloudflare` 比 `/google` 更快更稳**（p50 345 vs 362ms，平均 564 vs 761ms）；**国内域名必须直连腾讯 `doh.pub`**（实测 48ms，绕 Worker 会慢到 375–550ms）。阿里 `dns.alidns.com` 更快约 20ms，但本清单统一用腾讯系解析，保证腾讯域名调度一致。
 
-「设置 → DNS 设置 → 上游 DNS 服务器」最简两行（国内直连 + 国外走 Worker）：
+「设置 → DNS 设置 → 上游 DNS 服务器」最简两行（国内直连 + 国外走 EdgeOne 加速的日本节点）：
 
 ```
 [/*.cn/]https://dns.pub/dns-query
-https://doh.example.com/cloudflare/query-dns
+https://dohj.example.com/cloudflare/query-dns
 ```
+
+> 国外线路现状（108 实测 6 次）：`dohj.example.com`（EdgeOne→日本）0.23–0.33s；`doh.example.com`（Cloudflare Worker）0.60–3.09s。
+> 两者路径完全一致，把 `dohj.example.com` 换成 `doh.example.com` 即可切换，不要同时填。
 
 「Bootstrap DNS 服务器」必须填明文 DNS（AdGuard Home 要靠它解析代理域名本身，不能用自己的 DoH 上游）：
 
@@ -367,6 +370,7 @@ node scripts/check-doh.mjs --host my-app.edgeone.dev --cookie "eo_token=xxx; eo_
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
+| 1.1.2 | 2026-10-31 | 108 的 AGH 上游切换为「dns.pub 国内 + dohj.example.com 国外」并重启生效；实测 dohj 0.23–0.33s（example.com 为 0.60–3.09s）；文档同步推荐配置 |
 | 1.1.1 | 2026-10-31 | Go 版新增双监听（HTTP + TLS，`-tls-listen`）；日本节点启用自签 10 年证书（CN=dohj.example.com）并前置 EdgeOne 加速，上海侧 0.171–0.216s 稳定；修复 EdgeOne 回源 525；Host 白名单收紧至 dohj.example.com + 源站 IP |
 | 1.1.0 | 2026-10-31 | 新增 Go 版实现 `server/`（单文件、仅标准库、含单元测试）并部署到腾讯云日本节点 203.0.113.10:8080（systemd 托管）；源站直连实测 0.106–0.120s，远优于 Cloudflare Worker 的 0.885–3.706s；新增 scripts/deploy-jp.bat 与 scripts/doh-proxy.service |
 | 1.0.11 | 2026-10-31 | 新增备用入口 `doh2.example.com`（同一 Worker 双域名 + 双证书），ALLOWED_HOSTS 同步；docs 补双入口说明与「新增域名后本地解析不了多为 AGH 负缓存」的排查记录 |
