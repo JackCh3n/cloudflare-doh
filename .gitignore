@@ -171,3 +171,6 @@ dist
 .dev.vars
 .wrangler/
 .genaiscript/
+
+# EdgeOne 构建产物与本地凭据（不要提交）
+.edgeone/
