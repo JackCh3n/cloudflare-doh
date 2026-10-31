@@ -34,6 +34,9 @@
 
 ## 二、推荐配置（方案 A：速度优先，直接粘贴到「上游 DNS 服务器」）
 
+> 地址写法：下面用的是显式路径 `https://doh.example.com/cloudflare/query-dns`。
+> 2026-10-31 起，`https://doh.example.com`、`/dns-query`、`/query-dns` 也都能直接用（自动走 `DEFAULT_UPSTREAM`，默认 cloudflare），所以只想要一个上游时填 `https://doh.example.com/dns-query` 就够了。
+
 ```
 # ============ 国内：直连国内 DoH ============
 [/*.cn/]https://dns.pub/dns-query
@@ -124,3 +127,52 @@ https://doh.example.com/cloudflare/query-dns
 | `cdn.qq.com` / `*.gtimg.cn` | 游戏资源 CDN |
 
 这些全部走国内 `dns.pub`，能拿到就近的国内节点；若走 Worker 的海外边缘，可能解析到香港/新加坡节点，延迟与登录失败率都会变高。
+
+## 六、「测试上游」失败排查（10.24.36.108 实机记录）
+
+排查环境：`orange-xq`（108 测试机，AdGuard Home 装在 `/vol1/@appcenter/AdGuardHome`，配置 `/vol1/@appdata/AdGuardHome/AdGuardHome.yaml`）。
+
+### 排查结论
+
+| 现象 | 实测 | 原因 / 处理 |
+| --- | --- | --- |
+| `https://doh.example.com` 测试失败 | `POST /` 返回 404（1588B HTML） | 早期版本只认 `/<上游>/query-dns`。**已修**：现在根路径、`/dns-query`、`/query-dns` 都可用（仅当请求头是 DoH 协议时才转发） |
+| `https://doh.example.com/dns-query` 失败 | 同上 404 | 同上，已修 |
+| `https://dns.cloudflare.com/dns-query` 不可用 | `code=000, 0.18s` 直接失败 | 该域名在国内被阻断，必须换成 `https://doh.example.com/cloudflare/query-dns` |
+| `https://dns.google/dns-query` 不可用 | `code=000, 10s` 超时 | 同上，走 Worker 的 `/google/query-dns` |
+| 上游解析偶发变慢 | 108 上 `ip -6 addr` 无全局地址、`ip -6 route` 无默认路由，`curl -6` **1.4ms 即失败** | bootstrap 里配了 3 台 IPv6 DNS，但本机没有 IPv6，建议删掉：`2400:3200::1`、`2402:4e00::`、`2001:dc7:1000::1`，只留 `223.5.5.5` / `119.29.29.29` |
+
+### 修好之后在 108 上的实测（HTTP/2，POST `application/dns-message`）
+
+```
+POST /                     → 200, 72B, 0.96s   （带 DoH 请求头）
+GET  /?dns=...             → 200, 72B          （带 accept: application/dns-message）
+POST /dns-query            → 200, 72B, 1.53s
+POST /query-dns            → 200, 72B, 1.88s
+POST /cloudflare/query-dns → 200, 72B, 1.03s
+POST /google/query-dns     → 200, 72B, 2.02s
+POST /adguard/query-dns    → 200, 72B, 0.90s
+浏览器 GET /               → 404 text/html（伪装页，按设计）
+```
+
+### 108 建议的上游写法
+
+```
+# 国内直连（108 实测 0.13s / 0.18s）
+[/*.cn/]https://dns.alidns.com/dns-query
+[/qq.com/*.qq.com/tencent.com/*.tencent.com/tencentgames.com/*.tencentgames.com/]https://dns.alidns.com/dns-query
+[/bilibili.com/*.bilibili.com/hdslb.com/*.hdslb.com/]https://dns.alidns.com/dns-query
+[/microsoft.com/*.microsoft.com/]https://dns.alidns.com/dns-query
+
+# 国外走自己的 Worker
+[/cloudfront.net/*.cloudfront.net/akamaihd.net/*.akamaihd.net/]https://doh.example.com/cloudflare/query-dns
+[/github.com/*.github.com/steamcommunity.com/steampowered.com/*.steampowered.com/]https://doh.example.com/cloudflare/query-dns
+[/google.com/*.google.com/youtube.com/*.youtube.com/]https://doh.example.com/cloudflare/query-dns
+
+# 默认
+https://doh.example.com/cloudflare/query-dns
+
+# Bootstrap（只留 IPv4，108 没有 IPv6）
+223.5.5.5
+119.29.29.29
+```

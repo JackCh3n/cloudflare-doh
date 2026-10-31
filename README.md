@@ -91,6 +91,16 @@ cloudflare-doh/
 | `DOMAIN_MAPPINGS` | 覆盖整张路径映射表（JSON 字符串或对象） | 内置 6 家 |
 | `ALLOWED_HOSTS` | 允许访问的 Host 白名单，逗号分隔；配置后其余域名一律返回伪装 404 | 不限制 |
 | `CACHE_TTL` | `GET + application/dns-message` 响应的缓存秒数；`0` 表示完全不缓存 | `0` |
+| `DEFAULT_UPSTREAM` | 裸路径（`/`、`/dns-query`、`/query-dns`）兜底走哪家上游 | `cloudflare` |
+
+地址形式都可用（`DEFAULT_UPSTREAM=cloudflare` 时等价）：
+
+```
+https://doh.example.com/                     # 仅当请求头是 DoH 协议时才转发，浏览器访问仍是伪装 404
+https://doh.example.com/dns-query            # 标准 DoH 路径
+https://doh.example.com/query-dns            # 本项目的别名
+https://doh.example.com/cloudflare/query-dns # 显式指定上游
+```
 
 Cloudflare 侧写在 `wrangler.jsonc` 的 `vars`（或控制台「变量和机密」）；EdgeOne 侧写在项目根目录 `.env`。
 
@@ -328,6 +338,7 @@ node scripts/check-doh.mjs --host my-app.edgeone.dev --cookie "eo_token=xxx; eo_
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
+| 1.0.9 | 2026-10-31 | 兼容裸路径：根路径 / 与 /dns-query、/query-dns 均可作为 DoH 端点（仅当请求头为 DoH 协议时转发，浏览器访问仍是伪装 404），新增 DEFAULT_UPSTREAM；docs/adguard-home.md 补 108 实机排查记录 |
 | 1.0.8 | 2026-10-31 | 新增 docs/adguard-home.md：google/cloudflare 延迟实测（cloudflare 更快）、国内直连与绕 Worker 对比、含腾讯游戏的完整分流清单；README 精简为结论 + 链接 |
 | 1.0.7 | 2026-10-31 | 迁移完成：删除 Pages 项目与旧域名，Worker 以 custom_domain 绑定唯一入口 `doh.example.com`，workers.dev 与版本预览关闭，Workers Cache 实测 MISS→HIT，六家上游 12/12 全通 |
 | 1.0.6 | 2026-10-31 | 新增 `ALLOWED_HOSTS`（只允许绑定域名访问）与 `CACHE_TTL`（Workers Cache 显式缓存策略）；wrangler 配置关闭 workers_dev 与 preview_urls 并启用 `cache.enabled`；README 补充 Worker 生产配置与缓存两个坑 |

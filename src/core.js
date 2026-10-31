@@ -176,6 +176,37 @@ export function getPathMappings(env) {
 	return DEFAULT_PATH_MAPPINGS;
 }
 
+/** 根路径直连 DoH 的别名（多数 DoH 客户端默认就用 /dns-query） */
+const BARE_DOH_PATHS = ['/dns-query', '/query-dns'];
+
+/**
+ * 构造「无路径前缀」的默认 DoH 目标
+ * @param {URL} url
+ * @param {Object} [env]
+ * @returns {{prefix: string, targetDomain: string, targetUrl: string}|null}
+ */
+export function bareDohTarget(url, env) {
+	const name = String((env && env.DEFAULT_UPSTREAM) || 'cloudflare').replace(/^\/+/, '');
+	const mapping = getPathMappings(env)[`/${name}`];
+	if (!mapping || !mapping.targetDomain) return null;
+	return {
+		prefix: '/',
+		targetDomain: mapping.targetDomain,
+		targetUrl: `https://${mapping.targetDomain}/dns-query${url.search}`,
+	};
+}
+
+/**
+ * 判断请求是否真的是 DoH 请求（用于根路径兜底，避免把浏览器访问也放行）
+ * @param {Request} request
+ * @returns {boolean}
+ */
+export function isDohRequest(request) {
+	const accept = (request.headers.get('accept') || '').toLowerCase();
+	const contentType = (request.headers.get('content-type') || '').toLowerCase();
+	return accept.includes('application/dns-message') || contentType.includes('application/dns-message');
+}
+
 /**
  * 根据请求 URL 解析转发目标
  * @param {URL} url 原始请求 URL
@@ -192,7 +223,9 @@ export function resolveTarget(url, env) {
 		.sort((a, b) => b.length - a.length)[0];
 
 	if (!pathPrefix) {
-		return null;
+		// 兼容 https://域名/dns-query 这种「无前缀」的标准 DoH 写法
+		const bare = path.replace(/\/+$/, '');
+		return BARE_DOH_PATHS.includes(bare) ? bareDohTarget(url, env) : null;
 	}
 
 	const mapping = pathMappings[pathPrefix] || {};
@@ -271,7 +304,13 @@ export async function proxyRequest(request, options = {}) {
 		return camoResponse();
 	}
 
-	const target = resolveTarget(url, env);
+	let target = resolveTarget(url, env);
+
+	// 根路径兜底：只有「看起来确实是 DoH 请求」才转发，
+	// 浏览器直接访问 https://域名/ 仍返回伪装 404
+	if (!target && (url.pathname === '/' || url.pathname === '') && isDohRequest(request)) {
+		target = bareDohTarget(url, env);
+	}
 
 	if (!target) {
 		return camoResponse();
@@ -312,6 +351,8 @@ export async function proxyRequest(request, options = {}) {
 
 export default {
 	resolveTarget,
+	bareDohTarget,
+	isDohRequest,
 	getPathMappings,
 	getAllowedHosts,
 	isHostAllowed,

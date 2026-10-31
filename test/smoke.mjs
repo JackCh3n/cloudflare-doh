@@ -88,6 +88,46 @@ await check('根路径与未命中路径不转发', () => {
 	assert.equal(resolveTarget(new URL('https://x.dev/unknown/path')), null);
 });
 
+await check('裸 /dns-query 默认转发到 cloudflare（兼容标准 DoH 客户端写法）', () => {
+	assert.equal(resolveTarget(new URL('https://x.dev/dns-query?dns=abc')).targetUrl, 'https://one.one.one.one/dns-query?dns=abc');
+	assert.equal(resolveTarget(new URL('https://x.dev/query-dns')).targetUrl, 'https://one.one.one.one/dns-query');
+	assert.equal(resolveTarget(new URL('https://x.dev/dns-query/')).targetUrl, 'https://one.one.one.one/dns-query');
+});
+
+await check('DEFAULT_UPSTREAM 可改写裸路径的上游', () => {
+	assert.equal(
+		resolveTarget(new URL('https://x.dev/dns-query?dns=abc'), { DEFAULT_UPSTREAM: 'google' }).targetUrl,
+		'https://dns.google/dns-query?dns=abc'
+	);
+	assert.equal(
+		resolveTarget(new URL('https://x.dev/dns-query'), { DEFAULT_UPSTREAM: '/adguard' }).targetUrl,
+		'https://dns.adguard-dns.com/dns-query'
+	);
+	// 不存在的上游名回退为不转发
+	assert.equal(resolveTarget(new URL('https://x.dev/dns-query'), { DEFAULT_UPSTREAM: 'nope' }), null);
+});
+
+await check('根路径只有 DoH 请求才转发（浏览器访问仍是伪装 404）', async () => {
+	const stub = createFetchStub(new Response('bin', { status: 200 }));
+	const dohPost = await proxyRequest(
+		new Request('https://x.dev/', {
+			method: 'POST',
+			headers: { 'content-type': 'application/dns-message', accept: 'application/dns-message' },
+			body: new Uint8Array([1, 2, 3]),
+		}),
+		{ fetchImpl: stub }
+	);
+	assert.equal(dohPost.status, 200);
+	assert.equal(stub.calls[0].url, 'https://one.one.one.one/dns-query');
+
+	const browser = await proxyRequest(new Request('https://x.dev/', { headers: { accept: 'text/html' } }), {
+		fetchImpl: () => {
+			throw new Error('不应发起请求');
+		},
+	});
+	assert.equal(browser.status, 404);
+});
+
 await check('最长前缀优先匹配', () => {
 	const env = {
 		DOMAIN_MAPPINGS: {

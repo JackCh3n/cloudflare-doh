@@ -34,6 +34,8 @@
 	"vars": {
 		// 只允许这个域名访问，其余（含任何 workers.dev/pages.dev 遗留域名）返回伪装 404
 		"ALLOWED_HOSTS": "doh.example.com",
+		// 裸 /dns-query 走哪家上游（标准 DoH 客户端常直接请求该路径）
+		"DEFAULT_UPSTREAM": "cloudflare",
 		// GET + Accept: application/dns-message 的缓存秒数；0 表示完全不缓存
 		"CACHE_TTL": "30"
 	},
