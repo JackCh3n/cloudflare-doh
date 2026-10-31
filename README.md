@@ -273,7 +273,7 @@ dist/edgeone/
 
 AdGuard Home 的 DoH 上游语法就是 `https://域名/路径`，它会以 `POST` + `application/dns-message` 请求该地址；本代理正好原样透传方法与请求体。
 
-核心结论（HTTP/2 keep-alive 实测 15 次）：**国外域名走 `/cloudflare` 比 `/google` 更快更稳**（p50 345 vs 362ms，平均 564 vs 761ms）；**国内域名必须直连 `dns.pub` / `dns.alidns.com`**（26–53ms），绕 Worker 会慢到 375–550ms。
+核心结论（HTTP/2 keep-alive 实测 15 次）：**国外域名走 `/cloudflare` 比 `/google` 更快更稳**（p50 345 vs 362ms，平均 564 vs 761ms）；**国内域名必须直连腾讯 `doh.pub`**（实测 48ms，绕 Worker 会慢到 375–550ms）。阿里 `dns.alidns.com` 更快约 20ms，但本清单统一用腾讯系解析，保证腾讯域名调度一致。
 
 「设置 → DNS 设置 → 上游 DNS 服务器」最简两行（国内直连 + 国外走 Worker）：
 
@@ -338,6 +338,7 @@ node scripts/check-doh.mjs --host my-app.edgeone.dev --cookie "eo_token=xxx; eo_
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
+| 1.0.10 | 2026-10-31 | AGH 国内上游统一改为腾讯 doh.pub（去掉阿里），108 实测 qq.com / game.qq.com / pvp.qq.com 均返回腾讯云 CDN 就近节点 |
 | 1.0.9 | 2026-10-31 | 兼容裸路径：根路径 / 与 /dns-query、/query-dns 均可作为 DoH 端点（仅当请求头为 DoH 协议时转发，浏览器访问仍是伪装 404），新增 DEFAULT_UPSTREAM；docs/adguard-home.md 补 108 实机排查记录 |
 | 1.0.8 | 2026-10-31 | 新增 docs/adguard-home.md：google/cloudflare 延迟实测（cloudflare 更快）、国内直连与绕 Worker 对比、含腾讯游戏的完整分流清单；README 精简为结论 + 链接 |
 | 1.0.7 | 2026-10-31 | 迁移完成：删除 Pages 项目与旧域名，Worker 以 custom_domain 绑定唯一入口 `doh.example.com`，workers.dev 与版本预览关闭，Workers Cache 实测 MISS→HIT，六家上游 12/12 全通 |

@@ -32,6 +32,9 @@
 **结论：国内域名千万不要绕 Worker**，同一跳会让解析慢 8～20 倍（还拿不到国内就近 IP 的 ECS 优势）。
 国内直连、国外走 Worker，是唯一合理的组合。
 
+> 阿里 DoH 的 p50 比腾讯快约 20ms，但本清单**统一使用腾讯 `doh.pub`**：腾讯系（qq/微信/游戏）域名由同一家解析，
+> CDN 调度与登录链路更一致；`dns.alidns.com` 只在表里留作对照。
+
 ## 二、推荐配置（方案 A：速度优先，直接粘贴到「上游 DNS 服务器」）
 
 > 地址写法：下面用的是显式路径 `https://doh.example.com/cloudflare/query-dns`。
@@ -158,11 +161,12 @@ POST /adguard/query-dns    → 200, 72B, 0.90s
 ### 108 建议的上游写法
 
 ```
-# 国内直连（108 实测 0.13s / 0.18s）
-[/*.cn/]https://dns.alidns.com/dns-query
-[/qq.com/*.qq.com/tencent.com/*.tencent.com/tencentgames.com/*.tencentgames.com/]https://dns.alidns.com/dns-query
-[/bilibili.com/*.bilibili.com/hdslb.com/*.hdslb.com/]https://dns.alidns.com/dns-query
-[/microsoft.com/*.microsoft.com/]https://dns.alidns.com/dns-query
+# 国内直连（108 实测 dns.pub 0.18s；qq.com / game.qq.com / pvp.qq.com 均返回腾讯云 CDN 就近节点）
+[/*.cn/]https://doh.pub/dns-query
+[/qq.com/*.qq.com/tencent.com/*.tencent.com/tencentgames.com/*.tencentgames.com/]https://doh.pub/dns-query
+[/myqcloud.com/*.myqcloud.com/qcloud.com/*.qcloud.com/gtimg.cn/*.gtimg.cn/qpic.cn/*.qpic.cn/]https://doh.pub/dns-query
+[/bilibili.com/*.bilibili.com/hdslb.com/*.hdslb.com/]https://doh.pub/dns-query
+[/microsoft.com/*.microsoft.com/]https://doh.pub/dns-query
 
 # 国外走自己的 Worker
 [/cloudfront.net/*.cloudfront.net/akamaihd.net/*.akamaihd.net/]https://doh.example.com/cloudflare/query-dns
