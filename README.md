@@ -34,7 +34,9 @@ cloudflare-doh/
 ├── scripts/
 │   ├── dev.bat           # 本地调试：杀旧进程 → 装依赖 → 启动 → 打开浏览器
 │   ├── kill-dev.bat      # 结束占用 8787/8088/6699 的调试进程
-│   └── deploy-edgeone.bat# 一键部署到 EdgeOne Pages
+│   ├── deploy-edgeone.bat# 一键部署到 EdgeOne Pages
+│   └── pack-edgeone.mjs  # 生成手动上传目录 dist/edgeone（3 个文件）
+├── dist/edgeone/         # 手动上传产物（git 忽略，npm run pack:edgeone 生成）
 ├── wrangler.jsonc        # Cloudflare 部署配置
 └── package.json
 ```
@@ -146,6 +148,31 @@ edgeone makers deploy -n cloudflare-doh-overseas -a overseas -t <TOKEN> --json
 
 > `.edgeone/project.json` 只记录**最后一次**部署的项目，切换目标时务必显式带 `-n`（和 `-a`），否则会部署到上一次的项目。`.edgeone/` 已被 git 忽略。
 
+#### 手动上传（控制台「直接上传」，含 EdgeOne 国际版）
+
+不要直接上传仓库根目录（会带上 `.git`、`test/`、`scripts/`、`wrangler.jsonc` 等无关文件）。执行：
+
+```bash
+npm run pack:edgeone
+```
+
+会生成 `dist/edgeone/`，只有三个文件，这就是要上传的文件夹（控制台只接受文件夹或 zip，压成 zip 上传同样可以）：
+
+```
+dist/edgeone/
+├── middleware.js    # 平台入口（边缘中间件）
+├── src/core.js      # 共享核心，构建时被内联进 middleware，必须保留这层目录
+└── index.html       # 静态兜底页
+```
+
+已在 EdgeOne 上用这个最小目录实际部署验证过：`/` 返回伪装 404、`/google/` 返回 Google Public DNS 首页。
+
+> 国际版控制台（console.intl.cloud.tencent.com）操作一致；CLI 也能直接用，只是需要国际版的 API Token（`edgeone login --site global` 或控制台 → EdgeOne Pages → 设置 → API Token）：
+>
+> ```bash
+> edgeone makers deploy dist/edgeone -n cloudflare-doh -t <INTL_TOKEN> --json
+> ```
+
 线上验证记录（2026-10-31）：
 
 - `GET /` → 伪装 404 页面（中间件正常执行）
@@ -217,6 +244,7 @@ edgeone makers deploy -e preview   # 部署到预览环境验证
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
+| 1.0.3 | 2026-10-31 | 新增 `npm run pack:edgeone` 生成 3 文件手动上传目录 `dist/edgeone`（已在 EdgeOne 实测部署通过），README 补充控制台直接上传与国际版说明 |
 | 1.0.2 | 2026-10-31 | 新增 `-a overseas` 海外区域站点（`cloudflare-doh-overseas` / `makers-demo2`）并实测各上游可达性；README 补充双区域部署与项目 ID 对照 |
 | 1.0.1 | 2026-10-31 | 新增 `/dnspod`（doh.pub）、`/alidns`（dns.alidns.com）国内可达映射；补充 EdgeOne 大陆边缘的出网实测结论与 AdGuard Home 配置说明 |
 | 1.0.0 | 2026-10-31 | 抽取 `src/core.js` 共享核心，新增腾讯 EdgeOne Pages 中间件入口，冒烟测试替代原 vitest 模板测试 |
