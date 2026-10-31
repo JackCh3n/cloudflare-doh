@@ -38,6 +38,8 @@ cloudflare-doh/
 │   ├── pack-edgeone.mjs  # 生成手动上传目录 dist/edgeone（3 个文件）
 │   └── check-doh.mjs     # 线上自检：真实 DoH 查询并解析 A 记录
 ├── dist/edgeone/         # 手动上传产物（git 忽略，npm run pack:edgeone 生成）
+├── docs/
+│   └── adguard-home.md   # AdGuard Home 分流配置、延迟实测、腾讯游戏等分流清单
 ├── wrangler.jsonc        # Cloudflare 部署配置
 └── package.json
 ```
@@ -257,31 +259,28 @@ dist/edgeone/
 
 ## 作为 AdGuard Home 上游使用
 
+> 完整的分流清单（含腾讯游戏等国内域名规则）、google / cloudflare 实测延迟对比、备选方案，见 **[docs/adguard-home.md](docs/adguard-home.md)**。
+
 AdGuard Home 的 DoH 上游语法就是 `https://域名/路径`，它会以 `POST` + `application/dns-message` 请求该地址；本代理正好原样透传方法与请求体。
 
-「设置 → DNS 设置 → 上游 DNS 服务器」按部署位置二选一：
+核心结论（HTTP/2 keep-alive 实测 15 次）：**国外域名走 `/cloudflare` 比 `/google` 更快更稳**（p50 345 vs 362ms，平均 564 vs 761ms）；**国内域名必须直连 `dns.pub` / `dns.alidns.com`**（26–53ms），绕 Worker 会慢到 375–550ms。
+
+「设置 → DNS 设置 → 上游 DNS 服务器」最简两行（国内直连 + 国外走 Worker）：
 
 ```
-# 部署在腾讯 EdgeOne 中国站（大陆边缘）—— 只能用国内上游
-https://dohcn.example.com/dnspod/query-dns
-https://dohcn.example.com/alidns/query-dns
-
-# 部署在 EdgeOne 海外站点（-a overseas）或 Cloudflare Workers —— 可用海外上游
-https://doh-global.example.com/google/query-dns
-https://doh-global.example.com/adguard/query-dns
+[/*.cn/]https://dns.pub/dns-query
+https://doh.example.com/cloudflare/query-dns
 ```
-
-> 同一个子域名只能绑定一个项目：想同时保留国内与海外两套，请给海外站点单独绑一个子域名（海外区域不要求 ICP 备案，证书签发更快）。
 
 「Bootstrap DNS 服务器」必须填明文 DNS（AdGuard Home 要靠它解析代理域名本身，不能用自己的 DoH 上游）：
 
 ```
-223.5.5.5
 119.29.29.29
+223.5.5.5
 ```
 
 验证是否可用（不做 TLS 跳过就说明证书已就绪）：浏览器直接打开
-`https://dohcn.example.com/dnspod/dns-query?name=example.com&type=A` 应返回一段 JSON。
+`https://doh.example.com/cloudflare/dns-query?name=example.com&type=A` 应返回一段 JSON。
 
 ## 本地调试与测试
 
@@ -329,6 +328,7 @@ node scripts/check-doh.mjs --host my-app.edgeone.dev --cookie "eo_token=xxx; eo_
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
+| 1.0.8 | 2026-10-31 | 新增 docs/adguard-home.md：google/cloudflare 延迟实测（cloudflare 更快）、国内直连与绕 Worker 对比、含腾讯游戏的完整分流清单；README 精简为结论 + 链接 |
 | 1.0.7 | 2026-10-31 | 迁移完成：删除 Pages 项目与旧域名，Worker 以 custom_domain 绑定唯一入口 `doh.example.com`，workers.dev 与版本预览关闭，Workers Cache 实测 MISS→HIT，六家上游 12/12 全通 |
 | 1.0.6 | 2026-10-31 | 新增 `ALLOWED_HOSTS`（只允许绑定域名访问）与 `CACHE_TTL`（Workers Cache 显式缓存策略）；wrangler 配置关闭 workers_dev 与 preview_urls 并启用 `cache.enabled`；README 补充 Worker 生产配置与缓存两个坑 |
 | 1.0.5 | 2026-10-31 | 新增 `scripts/check-doh.mjs` 线上自检脚本（真实 DoH 查询 + 解析 A 记录）；用 `qq.com` / `test2.example.com` 复测三个站点六家上游，README 实测表改为真实域名结果 |
