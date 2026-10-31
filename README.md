@@ -35,7 +35,8 @@ cloudflare-doh/
 │   ├── dev.bat           # 本地调试：杀旧进程 → 装依赖 → 启动 → 打开浏览器
 │   ├── kill-dev.bat      # 结束占用 8787/8088/6699 的调试进程
 │   ├── deploy-edgeone.bat# 一键部署到 EdgeOne Pages
-│   └── pack-edgeone.mjs  # 生成手动上传目录 dist/edgeone（3 个文件）
+│   ├── pack-edgeone.mjs  # 生成手动上传目录 dist/edgeone（3 个文件）
+│   └── check-doh.mjs     # 线上自检：真实 DoH 查询并解析 A 记录
 ├── dist/edgeone/         # 手动上传产物（git 忽略，npm run pack:edgeone 生成）
 ├── wrangler.jsonc        # Cloudflare 部署配置
 └── package.json
@@ -61,19 +62,22 @@ cloudflare-doh/
 
 > 前缀之后没有剩余路径时会补 `/`，例如 `/google?name=a.com` → `https://dns.google/?name=a.com`。
 
-### 部署位置决定能用哪几家上游（实测）
+### 部署位置决定能用哪几家上游（真实域名实测）
 
-同一份代码，边缘节点所在地区不同，能连通的上游完全不同：
+同一份代码，边缘节点所在地区不同，能连通的上游完全不同。下表用 `scripts/check-doh.mjs` 对三个线上站点各发真实 DoH 查询（`POST application/dns-message`，域名 `qq.com` / `test2.example.com`），判据是「返回 `rcode=0` 且至少一条 A 记录」；`502 BAD_GATEWAY` / `504 GATEWAY_TIMEOUT` / `505` 都是 EdgeOne 边缘自己返回的错误页，说明请求没到上游。
 
-| 部署位置 | dns.google | one.one.one.one | dns.quad9.net | dns.adguard-dns.com | doh.pub | dns.alidns.com |
+| 站点 | google | cloudflare | quad9 | adguard | dnspod | alidns |
 | --- | --- | --- | --- | --- | --- | --- |
-| EdgeOne `-a global`（大陆边缘，自定义域名 `dohcn.example.com`） | ❌ 504 | ❌ 504 | ❌ 504 | ❌ 504 | ✅ 200 | ✅ 200 |
-| EdgeOne `-a overseas`（海外节点 `203.0.113.30`） | ✅ 200 | ⚠️ 不稳定（`/query-dns` 有响应，`/` 504） | ❌ 502 BAD_GATEWAY | ✅ 200 | ✅ 200 | ✅ 200 |
-| EdgeOne 国际版（控制台手动上传 `dist/edgeone`，`.edgeone.dev`） | ✅ 200 | ⚠️ 不稳定（400 与 504 交替） | ❌ 平台错误页 | ✅ 200 | ✅ 200 | ✅ 200 |
+| `dohcn.example.com`（`-a global`，大陆边缘） | ❌ 504 | ❌ 504 | ❌ 504 | ❌ 504 | ✅ 2/2 | ✅ 2/2 |
+| `-a overseas`（203.0.113.30） | ✅ 2/2 | ⚠️ 1/2（qq 通过，test2 504） | ❌ 502/505 | ✅ 2/2 | ✅ 2/2 | ✅ 2/2 |
+| 国际版（`.edgeone.dev`） | ✅ 2/2 | ⚠️ 1/2（qq 504，test2 通过） | ❌ 505/502 | ✅ 2/2 | ✅ 2/2 | ✅ 2/2 |
 
-判定方法：能取到上游自身的响应（HTML/JSON/二进制）记为可用；返回 EdgeOne 的 `502 BAD_GATEWAY` / `504 GATEWAY_TIMEOUT` 错误页记为不可达。
+参照值（同一批查询的真实应答）：
 
-结论：**大陆边缘只能用 `/dnspod`、`/alidns`**；要访问 Google / AdGuard 的 DoH，用 `-a overseas` 的海外站点（或部署到 Cloudflare Workers），两类部署不要混用。
+- `qq.com` → `123.150.76.218`、`203.205.254.157`、`113.108.81.189`（腾讯网）
+- `test2.example.com` → `76.76.21.21` / `76.76.21.103` / `76.76.21.104` / `76.76.21.123` / `76.76.21.164`（Vercel）
+
+结论：**Quad9 在 EdgeOne 三个站点全军覆没，Cloudflare 约一半成功率**（且不同站点失败的域名还不一样），这两家不建议放进 AdGuard Home 上游；Google / AdGuard 只在海外站点可用；dnspod / alidns 三个站点都稳，其中大陆边缘最快（120–280ms，海外节点绕一圈约 0.6–3.5s，含每次新建 TLS 握手）。
 
 ## 配置
 
@@ -233,6 +237,23 @@ edgeone makers deploy -e preview   # 部署到预览环境验证
 
 **EdgeOne 本地预览的已知限制**：本仓库根目录同时存在 Cloudflare 的 `wrangler.jsonc` / `_worker.js`，`edgeone makers dev` 会复用该 wrangler 配置作为回源服务，导致中间件拿不到运行所需的 `hookCtx`，控制台报 `Cannot read properties of undefined (reading 'fetch')`，请求会落到 Cloudflare 入口而不是中间件。**这不影响线上部署**（线上已按上表验证通过）。需要端到端验证 EdgeOne 行为时，请用 `edgeone makers deploy -e preview`。
 
+### 线上自检（真实 DoH 查询）
+
+`scripts/check-doh.mjs` 会对指定站点逐个上游发真实 `POST application/dns-message` 查询，解析应答并打印 A 记录，用来确认「转发真的能出结果」而不只是「页面上有点东西」。
+
+```bash
+# 自定义域名（证书还没签发时加 --insecure，本地 DNS 解析不到时加 --ip 直连）
+node scripts/check-doh.mjs --host dohcn.example.com --ip 203.0.113.20 --insecure
+
+# 只测能用的两家
+node scripts/check-doh.mjs --host dohcn.example.com --ip 203.0.113.20 --insecure --providers dnspod,alidns
+
+# 预览域名（*.edgeone.cool / *.edgeone.dev）先取 cookie：curl -D - "<预览URL>" | grep -i set-cookie
+node scripts/check-doh.mjs --host my-app.edgeone.dev --cookie "eo_token=xxx; eo_time=123"
+```
+
+参数：`--host` 必填，其余可选 `--ip`、`--insecure`、`--cookie`、`--providers`、`--domains`。全部失败时退出码为 1，方便接 CI。
+
 ## 注意事项
 
 - 只转发请求，不修改也不存储 DNS 查询内容
@@ -245,6 +266,7 @@ edgeone makers deploy -e preview   # 部署到预览环境验证
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
+| 1.0.5 | 2026-10-31 | 新增 `scripts/check-doh.mjs` 线上自检脚本（真实 DoH 查询 + 解析 A 记录）；用 `qq.com` / `test2.example.com` 复测三个站点六家上游，README 实测表改为真实域名结果 |
 | 1.0.4 | 2026-10-31 | 补记国际版手动上传站点（`doh-preview.edgeone.dev`）实测结果：中间件被正确识别，Google / AdGuard / doh.pub / AliDNS 可达，Quad9 不可达、Cloudflare 不稳定 |
 | 1.0.3 | 2026-10-31 | 新增 `npm run pack:edgeone` 生成 3 文件手动上传目录 `dist/edgeone`（已在 EdgeOne 实测部署通过），README 补充控制台直接上传与国际版说明 |
 | 1.0.2 | 2026-10-31 | 新增 `-a overseas` 海外区域站点（`cloudflare-doh-overseas` / `makers-demo2`）并实测各上游可达性；README 补充双区域部署与项目 ID 对照 |
