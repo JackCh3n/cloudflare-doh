@@ -33,6 +33,20 @@ export const DEFAULT_PATH_MAPPINGS = {
 			'/query-dns': '/dns-query',
 		},
 	},
+	// 国内可达的 DoH（部署在国内边缘节点时优先使用）
+	'/dnspod': {
+		targetDomain: 'doh.pub',
+		pathMapping: {
+			'/query-dns': '/dns-query',
+			'/dns-query': '/dns-query',
+		},
+	},
+	'/alidns': {
+		targetDomain: 'dns.alidns.com',
+		pathMapping: {
+			'/query-dns': '/dns-query',
+		},
+	},
 	// 在此继续添加映射
 };
 

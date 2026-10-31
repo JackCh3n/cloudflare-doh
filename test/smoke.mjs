@@ -39,8 +39,21 @@ function createFetchStub(response = new Response('ok', { status: 200 })) {
 
 console.log('cloudflare-doh 冒烟测试');
 
-await check('默认映射包含 google/cloudflare/quad9/adguard 四家 DoH', () => {
-	assert.deepEqual(Object.keys(DEFAULT_PATH_MAPPINGS).sort(), ['/adguard', '/cloudflare', '/google', '/quad9']);
+await check('默认映射包含 6 家 DoH（含国内可达的 dnspod/alidns）', () => {
+	assert.deepEqual(Object.keys(DEFAULT_PATH_MAPPINGS).sort(), [
+		'/adguard',
+		'/alidns',
+		'/cloudflare',
+		'/dnspod',
+		'/google',
+		'/quad9',
+	]);
+});
+
+await check('/dnspod 与 /alidns 映射到国内 DoH', () => {
+	assert.equal(resolveTarget(new URL('https://x.dev/dnspod/query-dns?name=a.com')).targetUrl, 'https://doh.pub/dns-query?name=a.com');
+	assert.equal(resolveTarget(new URL('https://x.dev/dnspod/dns-query?name=a.com')).targetUrl, 'https://doh.pub/dns-query?name=a.com');
+	assert.equal(resolveTarget(new URL('https://x.dev/alidns/query-dns?name=a.com')).targetUrl, 'https://dns.alidns.com/dns-query?name=a.com');
 });
 
 await check('/google/query-dns 转发到 dns.google/dns-query 且保留查询串', () => {

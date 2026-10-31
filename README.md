@@ -54,8 +54,21 @@ cloudflare-doh/
 | `/cloudflare` | `one.one.one.one` | `/query-dns` → `/dns-query` |
 | `/quad9` | `dns.quad9.net` | `/query-dns` → `/dns-query` |
 | `/adguard` | `dns.adguard-dns.com` | `/query-dns` → `/dns-query` |
+| `/dnspod` | `doh.pub`（国内可达） | `/query-dns`、`/dns-query` → `/dns-query` |
+| `/alidns` | `dns.alidns.com`（国内可达） | `/query-dns` → `/dns-query` |
 
 > 前缀之后没有剩余路径时会补 `/`，例如 `/google?name=a.com` → `https://dns.google/?name=a.com`。
+
+### 部署位置决定能用哪几家上游（实测）
+
+同一份代码，边缘节点所在地区不同，能连通的上游完全不同：
+
+| 部署位置 | dns.google | one.one.one.one | dns.quad9.net | dns.adguard-dns.com | doh.pub | dns.alidns.com |
+| --- | --- | --- | --- | --- | --- | --- |
+| 腾讯 EdgeOne 中国站（大陆边缘） | ❌ 504 | ❌ 504 | ❌ 504 | ❌ 504 | ✅ 200 | ✅ 200 |
+| 腾讯 EdgeOne 预览域名（海外边缘） | ✅ 200 | — | — | — | — | — |
+
+结论：**部署在大陆边缘时只能用 `/dnspod`、`/alidns`**；要访问 Google / Cloudflare / Quad9 / AdGuard 的 DoH，请部署到 Cloudflare Workers（或其海外区域），这两类是不同用途的部署，不要混用。
 
 ## 配置
 
@@ -122,6 +135,39 @@ edgeone makers deploy -n cloudflare-doh -t <API_TOKEN> --json
 - `GET /google/query-dns?name=example.com&type=A` → 转发成功（浏览器未带 DoH `accept` 头，上游返回 400，属预期）
 - `GET /does-not-exist/abc` → 伪装 404
 
+自定义域名（`dohcn.example.com`，EdgeOne 中国站）实测：
+
+- `GET /` → 伪装 404，说明域名 CNAME 到 `*.pages.dnsoe6.com` 后中间件正常执行
+- `POST /dnspod/query-dns`、`POST /alidns/query-dns`（`application/dns-message`）→ 200，返回合法 DNS 应答（`rcode=0`，2 条 A 记录，约 0.2s）
+- `POST /google|cloudflare|quad9|adguard/query-dns` → 504（约 3s），大陆边缘访问不到这四家
+- 证书未签发时该域名返回腾讯默认证书 `*.cdn.myqcloud.com`，TLS 校验会失败（DoH 客户端 / AdGuard Home 会因此报证书错误）
+
+## 作为 AdGuard Home 上游使用
+
+AdGuard Home 的 DoH 上游语法就是 `https://域名/路径`，它会以 `POST` + `application/dns-message` 请求该地址；本代理正好原样透传方法与请求体。
+
+「设置 → DNS 设置 → 上游 DNS 服务器」按部署位置二选一：
+
+```
+# 部署在腾讯 EdgeOne 中国站（大陆边缘）—— 只能用国内上游
+https://dohcn.example.com/dnspod/query-dns
+https://dohcn.example.com/alidns/query-dns
+
+# 部署在 Cloudflare Workers —— 可用海外上游
+https://doh.example.com/google/query-dns
+https://doh.example.com/cloudflare/query-dns
+```
+
+「Bootstrap DNS 服务器」必须填明文 DNS（AdGuard Home 要靠它解析代理域名本身，不能用自己的 DoH 上游）：
+
+```
+223.5.5.5
+119.29.29.29
+```
+
+验证是否可用（不做 TLS 跳过就说明证书已就绪）：浏览器直接打开
+`https://dohcn.example.com/dnspod/dns-query?name=example.com&type=A` 应返回一段 JSON。
+
 ## 本地调试与测试
 
 ```bash
@@ -151,6 +197,7 @@ edgeone makers deploy -e preview   # 部署到预览环境验证
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
+| 1.0.1 | 2026-10-31 | 新增 `/dnspod`（doh.pub）、`/alidns`（dns.alidns.com）国内可达映射；补充 EdgeOne 大陆边缘的出网实测结论与 AdGuard Home 配置说明 |
 | 1.0.0 | 2026-10-31 | 抽取 `src/core.js` 共享核心，新增腾讯 EdgeOne Pages 中间件入口，冒烟测试替代原 vitest 模板测试 |
 
 ## 许可协议
