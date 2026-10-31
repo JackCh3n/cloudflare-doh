@@ -1,0 +1,29 @@
+[Unit]
+Description=DoH path-forward proxy (Go, cloudflare-doh)
+Documentation=https://github.com/JackCh3n/cloudflare-doh
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+ExecStart=/opt/doh-proxy/doh-proxy -listen :8080
+
+# 上游与路径映射沿用 Worker 版默认值，需要改映射就设 DOMAIN_MAPPINGS（JSON 字符串）
+Environment=LISTEN_ADDR=:8080
+Environment=DEFAULT_UPSTREAM=cloudflare
+Environment=CACHE_TTL=30
+Environment=HEALTH_PATH=/healthz
+# EdgeOne 加速域名定下来后，把域名填进来即可只允许该域名访问，例如：
+# Environment=ALLOWED_HOSTS=doh2.example.com
+Environment=ALLOWED_HOSTS=
+
+Restart=always
+RestartSec=2
+LimitNOFILE=65535
+NoNewPrivileges=yes
+ProtectSystem=full
+ProtectHome=yes
+PrivateTmp=yes
+
+[Install]
+WantedBy=multi-user.target

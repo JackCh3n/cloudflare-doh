@@ -1,16 +1,17 @@
-# Cloudflare DoH 转发代理（Cloudflare + 腾讯 EdgeOne 双平台）
+# Cloudflare DoH 转发代理（Cloudflare / EdgeOne / 自建 Go 三端）
 
 ![使用演示](https://i.imgur.com/hu6F10P.gif)
 
 这是一个基于边缘函数运行的 DNS over HTTPS (DoH) 转发代理服务。它按**请求路径前缀**把请求反向代理到不同的 DoH 提供商，并原样保留查询参数与请求体。
 
-同一份路由逻辑同时支持三个部署入口：
+同一套路由规则有四个部署入口：
 
 | 平台 | 入口文件 | 运行时 | 状态 |
 | --- | --- | --- | --- |
-| Cloudflare Workers | `_worker.js` | V8 Worker | 已验证 |
-| Cloudflare Pages | `_worker.js`（Pages 高级模式） | V8 Worker | 已验证 |
+| Cloudflare Workers（生产） | `_worker.js` | V8 Worker | 已验证（`doh.example.com`、`doh2.example.com`） |
+| Cloudflare Pages | `_worker.js`（Pages 高级模式） | V8 Worker | 已验证（已降级为备选） |
 | 腾讯 EdgeOne Pages | `middleware.js`（边缘中间件） | V8 Edge Middleware | 已验证（2026-10-31 线上部署通过） |
+| 自建服务器 + EdgeOne 加速 | `server/main.go` | Go 1.22 单进程 | 日本节点已上线（源站直连实测 ~110ms） |
 
 ## 功能特点
 
@@ -29,6 +30,11 @@ cloudflare-doh/
 ├── index.html            # 静态兜底页（内容与伪装 404 一致）
 ├── src/
 │   └── core.js           # 共享核心：默认映射、路径解析、代理转发、伪装 404
+├── server/               # Go 版实现（自建服务器 + EdgeOne 加速），见 server/README.md
+│   ├── main.go           # 单文件服务：路由、转发、白名单、缓存头、优雅退出
+│   ├── main_test.go      # 单元测试（映射/白名单/伪装 404/缓存策略/裸路径）
+│   ├── go.mod
+│   └── README.md
 ├── test/
 │   └── smoke.mjs         # 零依赖冒烟测试（node test/smoke.mjs）
 ├── scripts/
@@ -267,6 +273,28 @@ dist/edgeone/
 - `POST /google|cloudflare|quad9|adguard/query-dns` → 504（约 3s），大陆边缘访问不到这四家
 - 证书未签发时该域名返回腾讯默认证书 `*.cdn.myqcloud.com`，TLS 校验会失败（DoH 客户端 / AdGuard Home 会因此报证书错误）
 
+### 四、自建服务器（Go 版）+ EdgeOne 加速
+
+当边缘函数的上游连通性/时延不满足要求时，可以自己起一个 Go 服务，再用 EdgeOne 做前置加速。这是唯一不受「边缘节点出网限制」影响的方案——上游由你自己的服务器直连。
+
+```bash
+cd server
+go test ./...
+GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o doh-proxy .
+# 上传 + systemd（详见 server/README.md）
+```
+
+已在腾讯云日本节点（`203.0.113.10:8080`）上线，客户端在中国大陆实测：
+
+| 目标 | 8 次耗时 |
+| --- | --- |
+| 日本源站直连 `http://203.0.113.10:8080/cloudflare/query-dns` | 0.106–0.120s（非常稳定） |
+| Cloudflare Worker `https://doh.example.com/cloudflare/query-dns` | 0.885–3.706s（波动大） |
+
+EdgeOne 加速侧只需填四个值：源站 `203.0.113.10`、协议 `HTTP`、端口 `8080`、加速域名（备案后可用大陆节点）。完整步骤与注意事项见 **[server/README.md](server/README.md)**。
+
+一键部署脚本：`scripts\deploy-jp.bat`（需先 `set JP_SSH_PASS=...`）。
+
 ## 作为 AdGuard Home 上游使用
 
 > 完整的分流清单（含腾讯游戏等国内域名规则）、google / cloudflare 实测延迟对比、备选方案，见 **[docs/adguard-home.md](docs/adguard-home.md)**。
@@ -338,6 +366,7 @@ node scripts/check-doh.mjs --host my-app.edgeone.dev --cookie "eo_token=xxx; eo_
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
+| 1.1.0 | 2026-10-31 | 新增 Go 版实现 `server/`（单文件、仅标准库、含单元测试）并部署到腾讯云日本节点 203.0.113.10:8080（systemd 托管）；源站直连实测 0.106–0.120s，远优于 Cloudflare Worker 的 0.885–3.706s；新增 scripts/deploy-jp.bat 与 scripts/doh-proxy.service |
 | 1.0.11 | 2026-10-31 | 新增备用入口 `doh2.example.com`（同一 Worker 双域名 + 双证书），ALLOWED_HOSTS 同步；docs 补双入口说明与「新增域名后本地解析不了多为 AGH 负缓存」的排查记录 |
 | 1.0.10 | 2026-10-31 | AGH 国内上游统一改为腾讯 doh.pub（去掉阿里），108 实测 qq.com / game.qq.com / pvp.qq.com 均返回腾讯云 CDN 就近节点 |
 | 1.0.9 | 2026-10-31 | 兼容裸路径：根路径 / 与 /dns-query、/query-dns 均可作为 DoH 端点（仅当请求头为 DoH 协议时转发，浏览器访问仍是伪装 404），新增 DEFAULT_UPSTREAM；docs/adguard-home.md 补 108 实机排查记录 |
