@@ -20,6 +20,7 @@
 - **参数与请求体完整透传**：保留查询串，支持 DoH 的 GET 与 POST（`application/dns-message` 二进制体）
 - **路径映射可配置**：可用环境变量 `DOMAIN_MAPPINGS` 覆盖，也可以直接改默认映射
 - **伪装 404**：未命中映射的路径（含站点根路径）返回一个「浏览器断网」样式的 404 页面，不暴露代理特征
+- **应答缓存与熔断转移（v1.5.0 起，三端一致）**：进程内 LRU 缓存热门查询（键不含事务 ID，POST 也命中，命中时改写 ID 并按存活时间递减 TTL、跳过 OPT）；上游连续失败熔断、按 `FAILOVER_CHAIN` 同请求内无缝转移，全部不可用时 502/503 + Retry-After
 
 ## 目录结构
 
@@ -96,6 +97,24 @@ cloudflare-doh/
 
 结论：**Cloudflare Worker 是唯一六家上游全通的部署方式**（12/12，实测 1.0–3.1s，含 TLS 握手）。EdgeOne 侧三家都有短板：Quad9 全军覆没、Cloudflare 约一半成功率（且各站失败的域名还不一样）、Google / AdGuard 只在海外节点可用；只有 dnspod / alidns 在哪都稳。所以：**要全功能就用 Worker，EdgeOne 那套适合只跑国内上游的场景。**
 
+## 边缘版与 Go 版的能力对照
+
+v1.5.0 起三端能力对齐，差异只剩运行时模型：
+
+| 能力 | Worker / EdgeOne（边缘） | Go 版（自建） |
+| --- | --- | --- |
+| 路径转发 / 伪装 404 / 裸路径 DoH | ✅ | ✅ |
+| 进程内应答缓存（POST 也命中） | ✅ isolate 级，best-effort | ✅ 进程级，稳定（实测 215ms→5.5ms） |
+| 上游熔断 + `FAILOVER_CHAIN` 转移 | ✅（isolate 内计数） | ✅（进程级） |
+| 健康检查 / metrics | ✅（`HEALTH_PATH` / `METRICS_PATH`，默认关） | ✅（默认关） |
+| `Cache-Control` 边缘缓存提示（`CACHE_TTL`） | ✅ | ✅ |
+| 并发闸门 / 限速 / 内存护栏（`MAX_INFLIGHT` 等） | ➖ 并发治理归平台 | ✅ + systemd cgroup 硬护栏 |
+| TLS 监听 / 自签证书 | ➖ 平台终结 TLS | ✅ |
+
+> **isolate 说明**：边缘函数的缓存与熔断计数存活于单个 isolate（同一节点通常复用一段时间，
+> 部署或闲置回收后重置），是 best-effort 而非承诺值；热门域名的命中率随流量与节点分布浮动，
+> `/metrics` 的数字也是单 isolate 口径。缓存键/报文改写/熔断阈值等语义与 Go 版逐条一致。
+
 ## 配置
 
 ### 环境变量一览
@@ -104,8 +123,17 @@ cloudflare-doh/
 | --- | --- | --- |
 | `DOMAIN_MAPPINGS` | 覆盖整张路径映射表（JSON 字符串或对象） | 内置 6 家 |
 | `ALLOWED_HOSTS` | 允许访问的 Host 白名单，逗号分隔；配置后其余域名一律返回伪装 404 | 不限制 |
-| `CACHE_TTL` | `GET + application/dns-message` 响应的缓存秒数；`0` 表示完全不缓存 | `0` |
+| `CACHE_TTL` | `GET + application/dns-message` 响应的缓存秒数（响应头，供浏览器/CDN 用）；`0` 表示完全不缓存 | `0` |
 | `DEFAULT_UPSTREAM` | 裸路径（`/`、`/dns-query`、`/query-dns`）兜底走哪家上游 | `cloudflare` |
+| `CACHE_MAX_TTL` | 进程内应答缓存单条最长保留秒数（同时限制记录 TTL 上限），`0` = 关闭 | `300` |
+| `CACHE_ENTRIES` | 进程内缓存 LRU 条目上限 | `10000` |
+| `CB_THRESHOLD` | 上游连续失败多少次触发熔断 | `5` |
+| `CB_COOLDOWN_SEC` | 熔断冷却秒数，到期后放行探测 | `30` |
+| `FAILOVER_CHAIN` | 首选上游熔断后按序转移的其它上游，逗号分隔（空 = 禁用转移） | `cloudflare,google,adguard` |
+| `HEALTH_PATH` | 健康检查路径，命中返回 200 ok；空 = 关闭 | 空 |
+| `METRICS_PATH` | 运行指标 JSON（累计请求/上游错误/缓存命中/各上游健康），空 = 关闭 | 空 |
+
+> `CACHE_TTL` 只对 GET 生效（浏览器/CDN 层）；进程内缓存（`CACHE_MAX_TTL`）对 GET/POST 一视同仁，AdGuard Home 的 POST 查询同样受益。
 
 地址形式都可用（`DEFAULT_UPSTREAM=cloudflare` 时等价）：
 
@@ -435,6 +463,7 @@ node scripts/check-doh.mjs --host my-app.edgeone.dev --cookie "eo_token=xxx; eo_
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
+| 1.5.0 | 2026-11-01 | Worker/EdgeOne 版同步 Go 版能力：进程内应答缓存（DNS 报文级缓存键/TTL 递减/跳过 OPT，POST 也命中）、上游熔断与 `FAILOVER_CHAIN` 故障转移、`HEALTH_PATH`/`METRICS_PATH`、hop-by-hop 头剥离、64KB 体上限（413）、上游 15s 超时、读体失败降级转移；冒烟测试 26→46 项 |
 | 1.4.1 | 2026-11-01 | 新增 CNB 构建配置 `.cnb.yml`（分支/tag 推送自动构建 Docker 制品到 docker.cnb.cool）；全库移除个人部署信息（域名/IP/SSH 端口改为 doh.example.com 等占位示例），并重写历史 |
 | 1.4.0 | 2026-11-01 | 新增 Linux 一键部署脚本 `scripts/deploy-linux.sh`（Releases/本地二进制 → systemd，幂等，已有单元不覆盖）；GitHub Actions 自动发布：打 tag 构建多平台二进制到 Releases + 多架构 Docker 镜像到 GHCR（`ghcr.io/jackch3n/cloudflare-doh`）；README 移除赞助商广告并同步部署文档 |
 | 1.3.0 | 2026-11-01 | Go 版新增应答缓存（LRU + ID 改写 + TTL 递减 + 跳过 OPT，实测 215ms→5.5ms）与上游熔断/故障转移（连续失败熔断、冷却探测、FAILOVER_CHAIN 无缝切换）；systemd 增加 cgroup 硬护栏（768M/640M/200% CPU） |

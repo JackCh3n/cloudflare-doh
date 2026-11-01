@@ -110,12 +110,17 @@ TasksMax=512
 
 ## 与 Worker 版的差异
 
+v1.5.0 起 Worker / EdgeOne 版已同步本实现的应答缓存与熔断/故障转移，差异只剩运行时模型：
+
 | 项 | Worker / EdgeOne | Go 版 |
 | --- | --- | --- |
-| 边缘缓存 | Workers Cache（`cache.enabled`） | 无内置缓存，只输出 `Cache-Control`，由前置 CDN（EdgeOne）决定 |
+| 进程内应答缓存 | 有（isolate 级 best-effort，环境变量同名） | 有（进程级稳定，实测 215ms→5.5ms） |
+| 熔断/故障转移 | 有（`CB_*` / `FAILOVER_CHAIN`，isolate 内计数） | 有（进程级） |
+| healthz / metrics | 有（`HEALTH_PATH` / `METRICS_PATH`，metrics 为单 isolate 口径） | 有（进程级口径） |
+| 边缘缓存提示 | Workers Cache（`cache.enabled`，按 `CACHE_TTL`） | 只输出 `Cache-Control`，由前置 CDN（EdgeOne）决定 |
+| 并发/内存护栏 | 平台托管（无 `MAX_INFLIGHT` 等） | 用户态护栏 + systemd cgroup 硬护栏 |
 | 入口限制 | `workers_dev:false` + `custom_domain` + `ALLOWED_HOSTS` | 端口 + TLS + `ALLOWED_HOSTS` |
-| 伪装 404 | 有 | 有（页面逐字一致） |
-| 裸路径 DoH | 有 | 有 |
+| 伪装 404 / 裸路径 DoH | 有 | 有（页面逐字一致） |
 | 上游选择 | 6 家（含 dnspod / alidns） | 相同 |
 
 ## 部署到日本节点
