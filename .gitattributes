@@ -1,0 +1,5 @@
+# 换行符统一：脚本类文件必须 LF，Windows 批处理保持 CRLF
+* text=auto
+*.sh text eol=lf
+*.bat text eol=crlf
+*.cmd text eol=crlf
