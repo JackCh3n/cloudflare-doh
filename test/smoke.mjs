@@ -249,6 +249,18 @@ await check('最长前缀优先匹配', () => {
 	assert.equal(resolveTarget(new URL('https://x.dev/google/query'), env).targetDomain, 'dns.google');
 });
 
+await check('pathMapping 只做前缀重写且最长键优先（中间出现不误替换）', () => {
+	const env = {
+		DOMAIN_MAPPINGS: {
+			'/demo': { targetDomain: 'd.example.com', pathMapping: { '/dns': '/x', '/dns-query': '/dns-query' } },
+		},
+	};
+	// '/dns' 出现在中间不得被替换；rest 不以任何键开头时原样保留
+	assert.equal(resolveTarget(new URL('https://x.dev/demo/v1/dns-query'), env).targetUrl, 'https://d.example.com/v1/dns-query');
+	// 键长倒序：rest='/dns-query' 应命中更长的 '/dns-query' 而不是 '/dns'
+	assert.equal(resolveTarget(new URL('https://x.dev/demo/dns-query'), env).targetUrl, 'https://d.example.com/dns-query');
+});
+
 await check('DOMAIN_MAPPINGS 字符串 JSON 生效并覆盖默认值', () => {
 	const env = {
 		DOMAIN_MAPPINGS: JSON.stringify({

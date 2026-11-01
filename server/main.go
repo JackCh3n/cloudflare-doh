@@ -94,7 +94,7 @@ var defaultMappings = map[string]Mapping{
 
 // homepageHTML 未命中时返回的伪装 404 页面（与 Worker 版逐字一致）
 const homepageHTML = `<!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
@@ -103,6 +103,7 @@ const homepageHTML = `<!DOCTYPE html>
     <style>
         .main{
             width: 600px;
+            max-width: 92%;
             height:417px;
             margin: 0 auto;
             margin-top: 125px;
@@ -138,8 +139,8 @@ const homepageHTML = `<!DOCTYPE html>
         <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEgAAABIAQMAAABvIyEEAAAABlBMVEUAAABTU1OoaSf/AAAAAXRSTlMAQObYZgAAAENJREFUeF7tzbEJACEQRNGBLeAasBCza2lLEGx0CxFGG9hBMDDxRy/72O9FMnIFapGylsu1fgoBdkXfUHLrQgdfrlJN1BdYBjQQm3UAAAAASUVORK5CYII=" alt="">
         <p style="font-size:24px;">无法访问此网站</p>
         <p>检查是否有拼写错误。</p>
-        <p>如果拼写无误，请<span>尝试运行 Windos 网络诊断</span>。</p>
-        <p style="font-size:12px;">DNS_PROBE_FINSHED_NXDOMAIN</p>
+        <p>如果拼写无误，请<span>尝试运行 Windows 网络诊断</span>。</p>
+        <p style="font-size:12px;">DNS_PROBE_FINISHED_NXDOMAIN</p>
         <button>重新加载</button>
     </div>
 
@@ -834,12 +835,17 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// 读请求体（DoH 报文很小，64KB 上限）
+	// 读请求体（DoH 报文很小，64KB 上限；超限直接拒绝，
+	// 避免把静默截断后的畸形报文发给上游浪费一次查询）
 	var bodyBuf []byte
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
-		buf, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
+		buf, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes+1))
 		if err != nil {
 			http.Error(w, "bad request body", http.StatusBadRequest)
+			return
+		}
+		if len(buf) > maxBodyBytes {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
 			return
 		}
 		bodyBuf = buf
@@ -942,15 +948,31 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	defer resp.Body.Close()
 
-	// 可缓存响应先整段读出（DoH 应答极小），顺便落缓存
-	var cacheable []byte
+	// 可缓存响应先整段读出（DoH 应答极小），顺便落缓存。
+	// 多读 1 字节用于检测截断：超出上限时不能只写截断体——客户端会按上游
+	// Content-Length 挂起等剩余字节——改为把已读部分连同剩余一起写完。
+	var (
+		cacheable []byte
+		readBuf   []byte
+		readDone  bool
+		readErr   error
+	)
 	if cacheKey != "" && resp.StatusCode == http.StatusOK {
-		if buf, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes)); err == nil {
-			cacheable = buf
-			if len(cacheable) <= maxBodyBytes {
+		readBuf, readErr = io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
+		if readErr == nil {
+			readDone = len(readBuf) <= maxBodyBytes
+			if readDone {
+				cacheable = readBuf
 				s.storeCache(cacheKey, cacheable, resp.Header.Get("Content-Type"))
 			}
 		}
+	}
+	if readErr != nil {
+		// 响应体读失败（上游中途断流），此时响应头还未写出，直接按上游错误处理
+		s.totalErr.Add(1)
+		resp.Body.Close()
+		http.Error(w, "upstream error", http.StatusBadGateway)
+		return
 	}
 
 	for k, vv := range resp.Header {
@@ -980,7 +1002,13 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		m, _ := w.Write(cacheable)
 		n = int64(m)
 	} else {
-		n, _ = io.Copy(w, resp.Body)
+		if readBuf != nil {
+			// 截断检测已消费了前 maxBodyBytes+1 字节，先补写已读部分再续写剩余
+			m, _ := w.Write(readBuf)
+			n = int64(m)
+		}
+		m, _ := io.Copy(w, resp.Body)
+		n += m
 	}
 
 	if s.cfg.Verbose {

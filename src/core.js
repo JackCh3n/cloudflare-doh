@@ -68,7 +68,7 @@ export const DEFAULT_PATH_MAPPINGS = {
 
 /** 未命中映射时返回的伪装 404 页面（刻意伪装成浏览器断网页） */
 export const HOMEPAGE_HTML = `<!DOCTYPE html>
-<html lang="en">
+<html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
@@ -77,6 +77,7 @@ export const HOMEPAGE_HTML = `<!DOCTYPE html>
     <style>
         .main{
             width: 600px;
+            max-width: 92%;
             height:417px;
             margin: 0 auto;
             margin-top: 125px;
@@ -112,8 +113,8 @@ export const HOMEPAGE_HTML = `<!DOCTYPE html>
         <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEgAAABIAQMAAABvIyEEAAAABlBMVEUAAABTU1OoaSf/AAAAAXRSTlMAQObYZgAAAENJREFUeF7tzbEJACEQRNGBLeAasBCza2lLEGx0CxFGG9hBMDDxRy/72O9FMnIFapGylsu1fgoBdkXfUHLrQgdfrlJN1BdYBjQQm3UAAAAASUVORK5CYII=" alt="">
         <p style="font-size:24px;">无法访问此网站</p>
         <p>检查是否有拼写错误。</p>
-        <p>如果拼写无误，请<span>尝试运行 Windos 网络诊断</span>。</p>
-        <p style="font-size:12px;">DNS_PROBE_FINSHED_NXDOMAIN</p>
+        <p>如果拼写无误，请<span>尝试运行 Windows 网络诊断</span>。</p>
+        <p style="font-size:12px;">DNS_PROBE_FINISHED_NXDOMAIN</p>
         <button>重新加载</button>
     </div>
 
@@ -273,10 +274,13 @@ export function resolveTarget(url, env) {
 	const remainingPath = path.substring(pathPrefix.length);
 	const pathMapping = mapping.pathMapping || {};
 
+	// 按键长度倒序匹配，保证最长匹配（对齐 Go 版的 keys 排序）；
+	// 只做「前缀」重写——目标串出现在中间时不得误替换（对齐 Go 版 HasPrefix + 拼接）
 	let targetPath = remainingPath;
-	for (const [sourcePath, destPath] of Object.entries(pathMapping)) {
+	const rewriteRules = Object.entries(pathMapping).sort((a, b) => b[0].length - a[0].length);
+	for (const [sourcePath, destPath] of rewriteRules) {
 		if (remainingPath.startsWith(sourcePath)) {
-			targetPath = remainingPath.replace(sourcePath, destPath);
+			targetPath = destPath + remainingPath.slice(sourcePath.length);
 			break;
 		}
 	}

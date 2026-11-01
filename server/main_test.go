@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -307,5 +308,54 @@ func TestNoMetricsByDefault(t *testing.T) {
 	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "https://doh.example.com/metrics", nil))
 	if w.Code != http.StatusNotFound {
 		t.Errorf("未配置 METRICS_PATH 时应走伪装 404，实际 %d", w.Code)
+	}
+}
+
+// testDNSQuery 最小合法 DNS 查询：12B 头 + 根标签 + QTYPE/QCLASS（17B）
+func testDNSQuery() []byte {
+	b := make([]byte, 17)
+	b[2], b[3] = 0x01, 0x00 // RD
+	b[4], b[5] = 0x00, 0x01 // QDCOUNT=1
+	b[12] = 0x00            // 根 QNAME（QTYPE/QCLASS=0 仅用于测试）
+	return b
+}
+
+// 超过 64KB 的请求体必须直接 413，不允许把截断后的畸形报文转发给上游
+func TestRequestBodyTooLarge(t *testing.T) {
+	st := &stubTransport{}
+	s := testServer(Config{Mappings: defaultMappings, DefaultUpstream: "cloudflare"}, st)
+	body := bytes.Repeat([]byte{0x00}, maxBodyBytes+1)
+	req := httptest.NewRequest(http.MethodPost, "/cloudflare/query-dns", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/dns-message")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != http.StatusRequestEntityTooLarge {
+		t.Fatalf("期望 413，实际 %d", rec.Code)
+	}
+	if st.lastURL != "" {
+		t.Fatalf("超限请求不应转发到上游，实际转发了 %s", st.lastURL)
+	}
+}
+
+// 上游应答超过 64KB 时不能只写截断体（客户端会按 Content-Length 挂起），
+// 应把已读部分连同剩余一起写完，客户端拿到完整字节
+func TestLargeUpstreamResponseNotTruncated(t *testing.T) {
+	big := bytes.Repeat([]byte{0xAB}, maxBodyBytes+128)
+	st := &stubTransport{resp: &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": []string{"application/dns-message"}},
+		Body:       io.NopCloser(bytes.NewReader(big)),
+	}}
+	cfg := Config{Mappings: defaultMappings, DefaultUpstream: "cloudflare", CacheMaxTTL: 300, CacheEntries: 100}
+	s := testServer(cfg, st)
+	req := httptest.NewRequest(http.MethodPost, "/cloudflare/query-dns", bytes.NewReader(testDNSQuery()))
+	req.Header.Set("Content-Type", "application/dns-message")
+	rec := httptest.NewRecorder()
+	s.ServeHTTP(rec, req)
+	if rec.Code != 200 {
+		t.Fatalf("期望 200，实际 %d", rec.Code)
+	}
+	if rec.Body.Len() != len(big) {
+		t.Fatalf("应答被截断：收到 %d 字节，期望 %d", rec.Body.Len(), len(big))
 	}
 }

@@ -153,12 +153,13 @@ if [ "$ENABLE_TLS" = "1" ]; then
 		log "复用已有证书：$CERT"
 	else
 		command -v openssl >/dev/null || die "启用 TLS 需要 openssl（或改用 --no-tls / 手动放证书）"
-		# SAN：TLS_CN 是 IP 就记 IP，否则记 DNS；再补一个本机主 IP
+		# SAN：TLS_CN 是 IPv4 就记 IP，否则记 DNS（不能用「含点」判断——IPv4 也含点）
 		san=""
-		case "$TLS_CN" in
-			*.*) san="DNS:${TLS_CN}" ;;
-			*)   san="IP:${TLS_CN}" ;;
-		esac
+		if [[ "$TLS_CN" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+			san="IP:${TLS_CN}"
+		else
+			san="DNS:${TLS_CN}"
+		fi
 		primary_ip="$(ip -4 route get 1 2>/dev/null | sed -n 's/.*src \([0-9.]*\).*/\1/p' || true)"
 		if [ -n "$primary_ip" ] && [ "$primary_ip" != "$TLS_CN" ]; then
 			san="${san},IP:${primary_ip}"

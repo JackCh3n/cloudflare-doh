@@ -180,3 +180,4 @@ dist
 
 # EdgeOne 手动上传打包产物
 dist/
+.zcode/
