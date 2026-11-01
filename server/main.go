@@ -1,10 +1,11 @@
 // DoH 路径转发代理（Go 版，仅用标准库）
 //
 // 与仓库根目录的 Cloudflare Worker / EdgeOne 中间件实现路由逻辑一致：
-//   /<上游>/query-dns  → 该上游的 DoH 端点，保留查询串与请求体
-//   /<上游>/dns-query  → 同上（路径透传）
-//   /dns-query、/query-dns、/（仅 DoH 请求）→ DEFAULT_UPSTREAM
-//   其它路径 → 伪装 404 页面
+//
+//	/<上游>/query-dns  → 该上游的 DoH 端点，保留查询串与请求体
+//	/<上游>/dns-query  → 同上（路径透传）
+//	/dns-query、/query-dns、/（仅 DoH 请求）→ DEFAULT_UPSTREAM
+//	其它路径 → 伪装 404 页面
 //
 // 环境变量：
 //
@@ -20,7 +21,9 @@
 package main
 
 import (
+	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -31,9 +34,12 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"runtime/debug"
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -54,6 +60,15 @@ type Config struct {
 	CacheTTL        int
 	Verbose         bool
 	HealthPath      string
+	MetricsPath     string
+
+	// 并发与资源限制（对应 nginx 的 worker_connections / keepalive / 超时族）
+	MaxInFlight     int // 全局在途请求上限，满则 503（worker_connections 的作用）
+	MaxConnsPerHost int // 单上游连接上限，形成背压（keepalive 连接池上限）
+	MaxRPS          int // 全局限速（请求/秒），0 = 不限
+	MemLimitMB      int // 软内存上限（debug.SetMemoryLimit），0 = 不限
+	ReadTimeoutSec  int // 读完整请求（含 body）超时，防 slow-loris
+	WriteTimeoutSec int // 写响应超时，防慢客户端占连接
 }
 
 // defaultMappings 与 Worker 版保持一致
@@ -125,6 +140,12 @@ func loadConfig() Config {
 	cfg := Config{
 		Mappings:        defaultMappings,
 		DefaultUpstream: "cloudflare",
+		MaxInFlight:     envInt("MAX_INFLIGHT", 512),
+		MaxConnsPerHost: envInt("MAX_CONNS_PER_HOST", 64),
+		MaxRPS:          envInt("MAX_RPS", 0),
+		MemLimitMB:      envInt("MEM_LIMIT_MB", 512),
+		ReadTimeoutSec:  envInt("READ_TIMEOUT_SEC", 20),
+		WriteTimeoutSec: envInt("WRITE_TIMEOUT_SEC", 60),
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("DOMAIN_MAPPINGS")); raw != "" {
@@ -156,7 +177,22 @@ func loadConfig() Config {
 
 	cfg.Verbose = os.Getenv("VERBOSE") == "1"
 	cfg.HealthPath = strings.TrimSpace(os.Getenv("HEALTH_PATH"))
+	cfg.MetricsPath = strings.TrimSpace(os.Getenv("METRICS_PATH"))
 	return cfg
+}
+
+// envInt 读取整数环境变量，非法或缺省时用默认值；<=0 时按调用方语义处理
+func envInt(key string, def int) int {
+	v := strings.TrimSpace(os.Getenv(key))
+	if v == "" {
+		return def
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil {
+		log.Printf("%s=%q 非法，使用默认值 %d", key, v, def)
+		return def
+	}
+	return n
 }
 
 // hostAllowed 判断 Host 是否在白名单内
@@ -265,30 +301,121 @@ var hopHeaders = []string{
 type server struct {
 	cfg    Config
 	client *http.Client
+
+	// 并发控制与运行指标
+	inFlight    chan struct{}
+	inFlightNum atomic.Int64
+	totalReq    atomic.Uint64
+	totalErr    atomic.Uint64
+	startedAt   time.Time
+
+	rpsMu       sync.Mutex
+	windowStart time.Time
+	windowCount int
 }
 
 func newServer(cfg Config) *server {
+	if cfg.MaxInFlight <= 0 {
+		cfg.MaxInFlight = 512
+	}
+	if cfg.MaxConnsPerHost <= 0 {
+		cfg.MaxConnsPerHost = 64
+	}
+
+	// 传输层按 nginx 的连接复用思路调优：
+	//   MaxConnsPerHost 形成背压（多余的请求排队等空闲连接，而不是无限新建）
+	//   ClientSessionCache 复用 TLS 会话，省掉重复握手（高并发下 CPU 的大头）
 	transport := &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          200,
-		MaxIdleConnsPerHost:   32,
+		MaxIdleConns:          cfg.MaxConnsPerHost * 4,
+		MaxIdleConnsPerHost:   cfg.MaxConnsPerHost,
+		MaxConnsPerHost:       cfg.MaxConnsPerHost,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   8 * time.Second,
+		ResponseHeaderTimeout: 10 * time.Second,
 		ExpectContinueTimeout: time.Second,
+		TLSClientConfig: &tls.Config{
+			MinVersion:         tls.VersionTLS12,
+			ClientSessionCache: tls.NewLRUClientSessionCache(128),
+		},
 	}
-	return &server{cfg: cfg, client: &http.Client{Transport: transport, Timeout: 15 * time.Second}}
+	return &server{
+		cfg:       cfg,
+		client:    &http.Client{Transport: transport, Timeout: 15 * time.Second},
+		inFlight:  make(chan struct{}, cfg.MaxInFlight),
+		startedAt: time.Now(),
+	}
+}
+
+// tooManyRequests 全局限速（按秒窗口计数）
+func (s *server) tooManyRequests() bool {
+	if s.cfg.MaxRPS <= 0 {
+		return false
+	}
+	s.rpsMu.Lock()
+	defer s.rpsMu.Unlock()
+	now := time.Now()
+	if now.Sub(s.windowStart) >= time.Second {
+		s.windowStart = now
+		s.windowCount = 0
+	}
+	s.windowCount++
+	return s.windowCount > s.cfg.MaxRPS
+}
+
+func (s *server) writeMetrics(w http.ResponseWriter) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.Header().Set("Cache-Control", "no-store")
+	_ = json.NewEncoder(w).Encode(map[string]any{
+		"in_flight":       s.inFlightNum.Load(),
+		"total_requests":  s.totalReq.Load(),
+		"upstream_errors": s.totalErr.Load(),
+		"uptime_seconds":  int64(time.Since(s.startedAt).Seconds()),
+		"max_in_flight":   s.cfg.MaxInFlight,
+		"max_rps":         s.cfg.MaxRPS,
+	})
 }
 
 func (s *server) camo(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "text/html; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
 	w.WriteHeader(http.StatusNotFound)
 	_, _ = io.WriteString(w, homepageHTML)
 }
 
 func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	started := time.Now()
+
+	// 任何 panic 都不能带垮连接之外的状态
+	defer func() {
+		if err := recover(); err != nil {
+			log.Printf("panic: %v", err)
+			http.Error(w, "internal error", http.StatusInternalServerError)
+		}
+	}()
+
+	// 在途请求上限：满则快速失败，避免 goroutine 无界堆积
+	select {
+	case s.inFlight <- struct{}{}:
+		s.inFlightNum.Add(1)
+		s.totalReq.Add(1)
+		defer func() {
+			<-s.inFlight
+			s.inFlightNum.Add(-1)
+		}()
+	default:
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "server busy", http.StatusServiceUnavailable)
+		return
+	}
+
+	if s.tooManyRequests() {
+		w.Header().Set("Retry-After", "1")
+		http.Error(w, "rate limited", http.StatusTooManyRequests)
+		return
+	}
 
 	if !s.cfg.hostAllowed(r.Host) {
 		s.camo(w)
@@ -302,6 +429,11 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if s.cfg.MetricsPath != "" && r.URL.Path == s.cfg.MetricsPath {
+		s.writeMetrics(w)
+		return
+	}
+
 	target, ok := s.cfg.resolveTarget(r.URL.Path, r.URL.RawQuery)
 	if !ok && (r.URL.Path == "/" || r.URL.Path == "") && isDoHRequest(r) {
 		target, ok = s.cfg.bareTarget(r.URL.RawQuery)
@@ -312,13 +444,15 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var body io.Reader
+	bodyLen := 0
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		buf, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
 		if err != nil {
 			http.Error(w, "bad request body", http.StatusBadRequest)
 			return
 		}
-		body = strings.NewReader(string(buf))
+		body = bytes.NewReader(buf)
+		bodyLen = len(buf)
 	}
 
 	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, body)
@@ -332,15 +466,16 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	req.Header.Del("Host")
 	req.Header.Del("Content-Length")
-	if r.ContentLength > 0 {
-		req.ContentLength = r.ContentLength
-	}
+	// 始终显式设置长度，避免 chunked 转发被部分 DoH 上游拒绝
+	req.ContentLength = int64(bodyLen)
 
 	resp, err := s.client.Do(req)
 	if err != nil {
+		s.totalErr.Add(1)
 		if s.cfg.Verbose {
 			log.Printf("upstream failed: %s %s -> %v", r.Method, target, err)
 		}
+		w.Header().Set("Retry-After", "2")
 		http.Error(w, "upstream error", http.StatusBadGateway)
 		return
 	}
@@ -380,6 +515,10 @@ func main() {
 	flag.Parse()
 
 	cfg := loadConfig()
+	if cfg.MemLimitMB > 0 {
+		// 软内存上限：到顶先触发 GC 降速，而不是把整机拖进 OOM
+		debug.SetMemoryLimit(int64(cfg.MemLimitMB) << 20)
+	}
 	srv := newServer(cfg)
 
 	hasTLS := *certFile != "" && *keyFile != ""
@@ -393,10 +532,14 @@ func main() {
 
 	newHTTPServer := func(a string) *http.Server {
 		return &http.Server{
-			Addr:              a,
-			Handler:           srv,
+			Addr:    a,
+			Handler: srv,
+			// 超时族（对应 nginx client_header_timeout / client_body_timeout / send_timeout）
 			ReadHeaderTimeout: 10 * time.Second,
+			ReadTimeout:       time.Duration(cfg.ReadTimeoutSec) * time.Second,
+			WriteTimeout:      time.Duration(cfg.WriteTimeoutSec) * time.Second,
 			IdleTimeout:       120 * time.Second,
+			MaxHeaderBytes:    16 << 10, // DoH 头很小，限制头部大小防慢速大包
 		}
 	}
 
@@ -440,7 +583,8 @@ func main() {
 		defer cancel()
 		for _, s := range servers {
 			if err := s.Shutdown(ctx); err != nil {
-				log.Printf("关闭 %s 超时: %v", s.Addr, err)
+				log.Printf("关闭 %s 超时，强制断开剩余连接: %v", s.Addr, err)
+				_ = s.Close()
 			}
 		}
 	}

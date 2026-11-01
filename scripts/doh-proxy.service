@@ -21,6 +21,13 @@ Environment=TLS_KEY=/opt/doh-proxy/tls/dohj.key
 # 只允许 EdgeOne 加速域名与源站 IP 访问（伪造 Host 会拿到伪装 404）
 Environment=ALLOWED_HOSTS=dohj.example.com,203.0.113.10
 
+# 并发与资源护栏（默认即生效，无需再改）
+Environment=MAX_INFLIGHT=512        # 全局在途请求上限，满则 503 + Retry-After
+Environment=MAX_CONNS_PER_HOST=64   # 单上游连接上限，形成背压
+Environment=MEM_LIMIT_MB=512        # 软内存上限，先 GC 降速而不是 OOM
+Environment=METRICS_PATH=/metrics   # 运行指标（在途数/累计请求/上游错误）
+# 需要全局限速时再打开：Environment=MAX_RPS=200
+
 Restart=always
 RestartSec=2
 LimitNOFILE=65535

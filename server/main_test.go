@@ -14,6 +14,7 @@ type stubTransport struct {
 	lastMethod string
 	lastBody   string
 	lastAccept string
+	lastLength int64
 	resp       *http.Response
 	err        error
 }
@@ -22,6 +23,7 @@ func (s *stubTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	s.lastURL = r.URL.String()
 	s.lastMethod = r.Method
 	s.lastAccept = r.Header.Get("Accept")
+	s.lastLength = r.ContentLength
 	if r.Body != nil {
 		b, _ := io.ReadAll(r.Body)
 		s.lastBody = string(b)
@@ -40,7 +42,9 @@ func (s *stubTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 }
 
 func testServer(cfg Config, st *stubTransport) *server {
-	return &server{cfg: cfg, client: &http.Client{Transport: st}}
+	s := newServer(cfg)
+	s.client = &http.Client{Transport: st}
+	return s
 }
 
 func TestResolveTarget(t *testing.T) {
@@ -209,5 +213,99 @@ func TestHealthPath(t *testing.T) {
 	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "https://doh.example.com/healthz", nil))
 	if w.Code != 200 || w.Body.String() != "ok" {
 		t.Fatalf("健康检查异常：code=%d body=%q", w.Code, w.Body.String())
+	}
+}
+
+func TestInFlightLimit(t *testing.T) {
+	st := &stubTransport{}
+	s := testServer(Config{Mappings: defaultMappings, MaxInFlight: 1}, st)
+
+	// 先占满唯一槽位
+	s.inFlight <- struct{}{}
+	s.inFlightNum.Add(1)
+
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "https://doh.example.com/cloudflare/query-dns", nil))
+	if w.Code != http.StatusServiceUnavailable {
+		t.Errorf("槽位占满时应返回 503，实际 %d", w.Code)
+	}
+	if ra := w.Header().Get("Retry-After"); ra != "1" {
+		t.Errorf("503 应带 Retry-After: 1，实际 %q", ra)
+	}
+
+	// 释放后恢复
+	<-s.inFlight
+	s.inFlightNum.Add(-1)
+	w2 := httptest.NewRecorder()
+	s.ServeHTTP(w2, httptest.NewRequest(http.MethodGet, "https://doh.example.com/cloudflare/query-dns", nil))
+	if w2.Code != http.StatusOK {
+		t.Errorf("释放槽位后应恢复 200，实际 %d", w2.Code)
+	}
+	if s.inFlightNum.Load() != 0 {
+		t.Errorf("在途计数应归零，实际 %d", s.inFlightNum.Load())
+	}
+}
+
+func TestContentLengthAlwaysSet(t *testing.T) {
+	st := &stubTransport{}
+	s := testServer(Config{Mappings: defaultMappings}, st)
+	body := "\x33\x44\x01\x00"
+	req := httptest.NewRequest(http.MethodPost, "https://doh.example.com/cloudflare/query-dns", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/dns-message")
+	req.ContentLength = -1 // 模拟 chunked 进入
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+
+	if st.lastLength != int64(len(body)) {
+		t.Errorf("上游 ContentLength 应为 %d，实际 %d（chunked 不应被透传）", len(body), st.lastLength)
+	}
+	if st.lastBody != body {
+		t.Errorf("请求体未透传: %q", st.lastBody)
+	}
+}
+
+func TestGlobalRateLimit(t *testing.T) {
+	st := &stubTransport{}
+	s := testServer(Config{Mappings: defaultMappings, MaxRPS: 1}, st)
+
+	for i, want := range []int{http.StatusOK, http.StatusTooManyRequests} {
+		w := httptest.NewRecorder()
+		s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "https://doh.example.com/cloudflare/query-dns", nil))
+		if w.Code != want {
+			t.Errorf("第 %d 个请求状态码 %d，期望 %d", i+1, w.Code, want)
+		}
+	}
+}
+
+func TestMetricsEndpoint(t *testing.T) {
+	st := &stubTransport{}
+	s := testServer(Config{Mappings: defaultMappings, MetricsPath: "/internal-metrics"}, st)
+
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "https://doh.example.com/cloudflare/query-dns", nil))
+	if w.Code != 200 {
+		t.Fatalf("预热请求失败: %d", w.Code)
+	}
+
+	w2 := httptest.NewRecorder()
+	s.ServeHTTP(w2, httptest.NewRequest(http.MethodGet, "https://doh.example.com/internal-metrics", nil))
+	if w2.Code != 200 {
+		t.Fatalf("metrics 状态码 %d", w2.Code)
+	}
+	body := w2.Body.String()
+	for _, k := range []string{"total_requests", "in_flight", "uptime_seconds"} {
+		if !strings.Contains(body, k) {
+			t.Errorf("metrics 缺少字段 %s: %s", k, body)
+		}
+	}
+}
+
+func TestNoMetricsByDefault(t *testing.T) {
+	st := &stubTransport{}
+	s := testServer(Config{Mappings: defaultMappings}, st)
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, httptest.NewRequest(http.MethodGet, "https://doh.example.com/metrics", nil))
+	if w.Code != http.StatusNotFound {
+		t.Errorf("未配置 METRICS_PATH 时应走伪装 404，实际 %d", w.Code)
 	}
 }

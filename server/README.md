@@ -43,7 +43,27 @@ AdGuard Home 的 DoH 上游只接受 `https://`，所以想让 AGH 用它，必�
 | `DEFAULT_UPSTREAM` | 裸路径（`/`、`/dns-query`、`/query-dns`）走哪家 | `cloudflare` |
 | `CACHE_TTL` | `GET + application/dns-message` 的 `max-age`，`0` = 只发 `no-store` | `0` |
 | `HEALTH_PATH` | 健康检查路径，空 = 关闭 | 空 |
+| `METRICS_PATH` | 运行指标 JSON（在途数 / 累计请求 / 上游错误 / 运行时长） | 空（关闭） |
+| `MAX_INFLIGHT` | 全局在途请求上限，满则 `503 + Retry-After` | `512` |
+| `MAX_CONNS_PER_HOST` | 单上游连接上限，超出排队（背压），防连接数爆炸 | `64` |
+| `MAX_RPS` | 全局限速（请求/秒），`0` = 不限 | `0` |
+| `MEM_LIMIT_MB` | Go 软内存上限，到顶先 GC 降速而非 OOM | `512` |
+| `READ_TIMEOUT_SEC` / `WRITE_TIMEOUT_SEC` | 读完整请求 / 写响应超时，防 slow-loris 与慢客户端 | `20` / `60` |
 | `VERBOSE` | `1` 时打印每条请求 | 关闭 |
+
+## 高并发防护（对标 nginx）
+
+| nginx 概念 | 本服务对应实现 |
+| --- | --- |
+| `worker_connections` | `MAX_INFLIGHT`（信号量槽位，满则 503） |
+| `keepalive` 上游连接池 | `MaxIdleConnsPerHost` + `MaxConnsPerHost`（复用 + 背压） |
+| `ssl_session_cache` | `tls.NewLRUClientSessionCache(128)`（TLS 会话复用，省重复握手） |
+| `client_body_timeout` / `send_timeout` | `ReadTimeout` / `WriteTimeout` |
+| `limit_req` | `MAX_RPS`（秒窗口计数） |
+| 大文件头攻击 | `MaxHeaderBytes` 16KB（DoH 头很小） |
+| panic 隔离 | 每请求 `recover`，单请求异常不断服务 |
+
+压测（经 EdgeOne 全链路，2026-11-01）：200 请求 / 50 并发，全部 200，零错误；压测后服务 RSS 13MB、CPU 0.2%，`/metrics` 显示 `upstream_errors: 0`。
 
 ## 与 Worker 版的差异
 
