@@ -308,6 +308,7 @@ export function camoResponse() {
 			'Content-Type': 'text/html; charset=utf-8',
 			// 显式禁止缓存：否则 Workers Cache 会按启发式给 404 缓存 3 分钟
 			'Cache-Control': 'no-store',
+			'X-Content-Type-Options': 'nosniff',
 		},
 	});
 }
@@ -411,7 +412,8 @@ function dnsSectionStart(body) {
 function skipName(body, i) {
 	while (i < body.length) {
 		const l = body[i];
-		if ((l & 0xc0) !== 0) return i + 2;
+		if ((l & 0xc0) === 0xc0) return i + 2; // 压缩指针：占 2 字节并终止名字
+		if ((l & 0xc0) !== 0) return -1; // 0x40/0x80 开头的字节不是合法标签长度（对齐 Go：解析失败）
 		i += 1;
 		if (l === 0) return i;
 		i += l;
@@ -612,6 +614,10 @@ function createProviderHealth(threshold, cooldownMs) {
 				s.until = Date.now() + cooldownMs;
 			}
 		},
+		// 预登记一个上游（对齐 Go：/metrics 展示全部映射上游，而不仅是访问过的）
+		touch(name) {
+			get(name);
+		},
 		snapshot() {
 			const out = {};
 			for (const [name, s] of map) {
@@ -643,10 +649,15 @@ export function createEdgeState(env = {}) {
 		.split(',')
 		.map((s) => s.trim().toLowerCase().replace(/^\/+/, ''))
 		.filter(Boolean);
+	const health = createProviderHealth(cbThreshold, cbCooldownSec * 1000);
+	// 预登记全部映射上游：/metrics 的 providers 覆盖所有上游（对齐 Go newServer）
+	for (const name of Object.keys(getPathMappings(env))) {
+		health.touch(name.replace(/^\//, ''));
+	}
 	return {
 		cache: createDnsCache(cacheMaxTtl > 0 ? cacheEntries : 0, cacheMaxTtl),
 		cacheMaxTtl,
-		health: createProviderHealth(cbThreshold, cbCooldownSec * 1000),
+		health,
 		failoverChain,
 		startedAt: Date.now(),
 		totalRequests: 0,
@@ -686,11 +697,16 @@ function failoverCandidates(primary, state, env) {
 	return out;
 }
 
-/** 纯文本应答（错误/健康检查共用） */
+/** 纯文本应答（错误/健康检查共用；nosniff 对齐 Go http.Error） */
 function plainResponse(status, text, extraHeaders = {}) {
 	return new Response(text, {
 		status,
-		headers: { 'Content-Type': 'text/plain; charset=utf-8', 'Cache-Control': 'no-store', ...extraHeaders },
+		headers: {
+			'Content-Type': 'text/plain; charset=utf-8',
+			'Cache-Control': 'no-store',
+			'X-Content-Type-Options': 'nosniff',
+			...extraHeaders,
+		},
 	});
 }
 
@@ -867,10 +883,14 @@ export async function proxyRequest(request, options = {}) {
 	}
 
 	// 响应头：复制上游 → 剥 hop-by-hop → 覆盖缓存策略 → X-Cache
+	// （set-cookie 用 append 保留多条，对齐 Go 的 Add 语义）
 	const policy = cachePolicy(request, env);
 	const headers = new Headers();
 	upstream.headers.forEach((value, key) => {
-		if (!HOP_BY_HOP_HEADERS.includes(key.toLowerCase())) {
+		if (HOP_BY_HOP_HEADERS.includes(key.toLowerCase())) return;
+		if (key.toLowerCase() === 'set-cookie') {
+			headers.append(key, value);
+		} else {
 			headers.set(key, value);
 		}
 	});

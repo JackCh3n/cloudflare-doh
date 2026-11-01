@@ -463,6 +463,7 @@ node scripts/check-doh.mjs --host my-app.edgeone.dev --cookie "eo_token=xxx; eo_
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
+| 1.5.2 | 2026-11-02 | 第 2 轮递归审核修复（JS/Go 逐行对照）：JS 记录名解析对齐 Go——非法标签长度字节（0x40/0x80）按解析失败处理；伪装 404 与错误应答补 `X-Content-Type-Options: nosniff`；上游多条 set-cookie 透传不再互相覆盖；`/metrics` 预登记全部映射上游（对齐 Go 的 providers 全量口径）；deploy-jp.bat 不再覆盖系统 USER 变量；冒烟测试 47→48 项 |
 | 1.5.1 | 2026-11-02 | 第 1 轮全量代码审核修复：JS 版 pathMapping 改为最长键前缀重写（原 replace 会误替换中间出现的目标，与 Go 版语义分歧）；Go 版请求体超 64KB 返回 413（原静默截断转发）、上游应答超 64KB 不再写截断体（消除客户端按 Content-Length 挂起风险）、读体失败返回 502；伪装 404 页修正 Windows/FINISHED 拼写、适配窄屏（max-width）、lang 改 zh-CN，三处副本逐字同步；deploy-linux.sh 自签证书 IPv4 SAN 误判修复；冒烟测试 46→47 项 |
 | 1.5.0 | 2026-11-01 | Worker/EdgeOne 版同步 Go 版能力：进程内应答缓存（DNS 报文级缓存键/TTL 递减/跳过 OPT，POST 也命中）、上游熔断与 `FAILOVER_CHAIN` 故障转移、`HEALTH_PATH`/`METRICS_PATH`、hop-by-hop 头剥离、64KB 体上限（413）、上游 15s 超时、读体失败降级转移；冒烟测试 26→46 项 |
 | 1.4.1 | 2026-11-01 | 新增 CNB 构建配置 `.cnb.yml`（分支/tag 推送自动构建 Docker 制品到 docker.cnb.cool）；全库移除个人部署信息（域名/IP/SSH 端口改为 doh.example.com 等占位示例），并重写历史 |

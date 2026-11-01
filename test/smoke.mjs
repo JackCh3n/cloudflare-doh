@@ -331,10 +331,21 @@ await check('默认给上游响应加 no-store（避免 Workers Cache 启发式�
 	assert.equal(response.headers.get('cache-control'), 'no-store');
 });
 
-await check('伪装 404 带 no-store', async () => {
+await check('伪装 404 带 no-store 与 nosniff', async () => {
 	const response = await proxyRequest(new Request('https://x.dev/unknown'), { fetchImpl: () => { throw new Error('不应发起请求'); } });
 	assert.equal(response.status, 404);
 	assert.equal(response.headers.get('cache-control'), 'no-store');
+	assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+});
+
+await check('上游多条 set-cookie 透传时不被覆盖', async () => {
+	const upstream = new Response('x', { status: 200, headers: { 'content-type': 'application/dns-json' } });
+	upstream.headers.append('set-cookie', 'a=1');
+	upstream.headers.append('set-cookie', 'b=2');
+	const response = await proxyRequest(new Request('https://x.dev/google/query-dns?name=a.com', { headers: { accept: 'application/dns-json' } }), {
+		fetchImpl: createFetchStub(upstream),
+	});
+	assert.match(response.headers.get('set-cookie') || '', /a=1,\s*b=2/);
 });
 
 await check('CACHE_TTL>0 时仅缓存 GET + dns-message，并带 Vary: Accept', async () => {
@@ -450,6 +461,13 @@ await check('dnsMinTTL：A 记录 300；带 OPT 时忽略 OPT 的 0 TTL；畸形
 	assert.equal(dnsMinTTL(makeDnsResponse(1, 300)), 300);
 	assert.equal(dnsMinTTL(makeDnsResponse(1, 300, { withOPT: true })), 300);
 	assert.equal(dnsMinTTL(new Uint8Array(5)), -1);
+	// 名字区出现 0x40/0x80（非法标签长度，非 0xC0 指针）→ 解析失败，对齐 Go
+	const evil = makeDnsResponse(1, 300);
+	evil[12 + 17] = 0x40; // 应答区名字首字节改成非法长度
+	assert.equal(dnsMinTTL(evil), -1);
+	const evil2 = makeDnsResponse(1, 300);
+	evil2[12 + 17] = 0x80;
+	assert.equal(dnsMinTTL(evil2), -1);
 });
 
 await check('decrementTTLs：A 记录递减、OPT 的 TTL 字段不动、原报文不被修改、超额钳 0', () => {
@@ -648,6 +666,8 @@ await check('METRICS_PATH 输出 JSON：providers / cache 计数 / 累计指标'
 	assert.equal(m.upstream_errors, 0);
 	assert.equal(typeof m.uptime_seconds, 'number');
 	assert.deepEqual(m.providers.cloudflare, { healthy: true, consecutive_failures: 0 });
+	// providers 预登记全部映射上游（对齐 Go），而不是只有访问过的
+	assert.deepEqual(Object.keys(m.providers).sort(), ['adguard', 'alidns', 'cloudflare', 'dnspod', 'google', 'quad9']);
 	assert.equal(m.cache_hits, 0);
 	assert.equal(m.cache_misses, 1);
 	assert.equal(m.cache_entries, 1);
