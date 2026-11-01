@@ -1,0 +1,4 @@
+# 构建上下文只保留 server/（Go 源码），其余全部排除
+*
+!server/
+!Dockerfile
