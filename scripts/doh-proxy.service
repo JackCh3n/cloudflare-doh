@@ -25,8 +25,21 @@ Environment=ALLOWED_HOSTS=dohj.example.com,203.0.113.10
 Environment=MAX_INFLIGHT=512        # 全局在途请求上限，满则 503 + Retry-After
 Environment=MAX_CONNS_PER_HOST=64   # 单上游连接上限，形成背压
 Environment=MEM_LIMIT_MB=512        # 软内存上限，先 GC 降速而不是 OOM
-Environment=METRICS_PATH=/metrics   # 运行指标（在途数/累计请求/上游错误）
+Environment=METRICS_PATH=/metrics   # 运行指标（在途数/累计请求/上游错误/缓存/熔断）
 # 需要全局限速时再打开：Environment=MAX_RPS=200
+
+# 应答缓存与上游熔断
+Environment=CACHE_MAX_TTL=300       # 单条缓存最长 300s（同时限制记录 TTL 上限），0=关闭
+Environment=CACHE_ENTRIES=10000     # LRU 条目上限（约几 MB）
+Environment=CB_THRESHOLD=5          # 连续 5 次失败熔断
+Environment=CB_COOLDOWN_SEC=30      # 熔断冷却 30s，之后放行一次探测
+Environment=FAILOVER_CHAIN=cloudflare,google,adguard
+
+# cgroup 硬护栏：即使 Go 运行时失控也不会拖垮整机
+MemoryMax=768M
+MemoryHigh=640M
+CPUQuota=200%
+TasksMax=512
 
 Restart=always
 RestartSec=2

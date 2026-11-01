@@ -67,7 +67,7 @@ func TestResolveTarget(t *testing.T) {
 		{"/index.html", "", "", false},
 	}
 	for _, c := range cases {
-		got, ok := cfg.resolveTarget(c.path, c.query)
+		_, got, ok := cfg.resolveTarget(c.path, c.query)
 		if ok != c.ok || got != c.want {
 			t.Errorf("resolveTarget(%q) = (%q,%v)，期望 (%q,%v)", c.path, got, ok, c.want, c.ok)
 		}
@@ -79,7 +79,7 @@ func TestLongestPrefixWins(t *testing.T) {
 		"/google":    {TargetDomain: "dns.google"},
 		"/google-v2": {TargetDomain: "v2.example.com"},
 	}}
-	got, _ := cfg.resolveTarget("/google-v2/query", "")
+	_, got, _ := cfg.resolveTarget("/google-v2/query", "")
 	if got != "https://v2.example.com/query" {
 		t.Errorf("最长前缀匹配失败: %s", got)
 	}
@@ -87,12 +87,12 @@ func TestLongestPrefixWins(t *testing.T) {
 
 func TestDefaultUpstreamOverride(t *testing.T) {
 	cfg := Config{Mappings: defaultMappings, DefaultUpstream: "google"}
-	got, _ := cfg.resolveTarget("/dns-query", "dns=abc")
+	_, got, _ := cfg.resolveTarget("/dns-query", "dns=abc")
 	if got != "https://dns.google/dns-query?dns=abc" {
 		t.Errorf("DEFAULT_UPSTREAM 未生效: %s", got)
 	}
 	cfg.DefaultUpstream = "nope"
-	if _, ok := cfg.resolveTarget("/dns-query", ""); ok {
+	if _, _, ok := cfg.resolveTarget("/dns-query", ""); ok {
 		t.Error("不存在的上游应当不转发")
 	}
 }

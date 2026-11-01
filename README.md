@@ -370,6 +370,7 @@ node scripts/check-doh.mjs --host my-app.edgeone.dev --cookie "eo_token=xxx; eo_
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
+| 1.3.0 | 2026-11-01 | Go 版新增应答缓存（LRU + ID 改写 + TTL 递减 + 跳过 OPT，实测 215ms→5.5ms）与上游熔断/故障转移（连续失败熔断、冷却探测、FAILOVER_CHAIN 无缝切换）；systemd 增加 cgroup 硬护栏（768M/640M/200% CPU） |
 | 1.2.0 | 2026-11-01 | Go 版高并发加固：在途上限(503+Retry-After)、单上游连接背压、TLS 会话复用、全局限速、软内存上限、读写超时族、panic 隔离、Content-Length 显式化、/metrics 指标端点；经 EdgeOne 压测 200 请求/50 并发零错误 |
 | 1.1.2 | 2026-10-31 | 108 的 AGH 上游切换为「dns.pub 国内 + dohj.example.com 国外」并重启生效；实测 dohj 0.23–0.33s（example.com 为 0.60–3.09s）；文档同步推荐配置 |
 | 1.1.1 | 2026-10-31 | Go 版新增双监听（HTTP + TLS，`-tls-listen`）；日本节点启用自签 10 年证书（CN=dohj.example.com）并前置 EdgeOne 加速，上海侧 0.171–0.216s 稳定；修复 EdgeOne 回源 525；Host 白名单收紧至 dohj.example.com + 源站 IP |

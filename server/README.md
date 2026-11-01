@@ -49,6 +49,11 @@ AdGuard Home 的 DoH 上游只接受 `https://`，所以想让 AGH 用它，必�
 | `MAX_RPS` | 全局限速（请求/秒），`0` = 不限 | `0` |
 | `MEM_LIMIT_MB` | Go 软内存上限，到顶先 GC 降速而非 OOM | `512` |
 | `READ_TIMEOUT_SEC` / `WRITE_TIMEOUT_SEC` | 读完整请求 / 写响应超时，防 slow-loris 与慢客户端 | `20` / `60` |
+| `CACHE_MAX_TTL` | 内存缓存单条最长保留秒数（同时限制记录 TTL 上限），`0` = 关闭 | `300` |
+| `CACHE_ENTRIES` | 缓存 LRU 条目上限 | `10000` |
+| `CB_THRESHOLD` | 上游连续失败多少次触发熔断 | `5` |
+| `CB_COOLDOWN_SEC` | 熔断冷却秒数，到期后放行一次探测 | `30` |
+| `FAILOVER_CHAIN` | 首选上游熔断后按序尝试的其它上游 | `cloudflare,google,adguard` |
 | `VERBOSE` | `1` 时打印每条请求 | 关闭 |
 
 ## 高并发防护（对标 nginx）
@@ -64,6 +69,42 @@ AdGuard Home 的 DoH 上游只接受 `https://`，所以想让 AGH 用它，必�
 | panic 隔离 | 每请求 `recover`，单请求异常不断服务 |
 
 压测（经 EdgeOne 全链路，2026-11-01）：200 请求 / 50 并发，全部 200，零错误；压测后服务 RSS 13MB、CPU 0.2%，`/metrics` 显示 `upstream_errors: 0`。
+
+systemd 侧还叠了 cgroup 硬护栏，Go 运行时失控也不会拖垮整机：
+
+```ini
+MemoryMax=768M      # 硬上限，超过直接 OOM kill 本服务
+MemoryHigh=640M     # 软阈值，先施压回收
+CPUQuota=200%       # 最多 2 核
+TasksMax=512
+```
+
+## 应答缓存（本地 LRU）
+
+热门域名第二次查询直接本地返回，不再打上游。
+
+- **缓存键 = 上游名 + DNS flags + question 段**（QNAME/QTYPE/QCLASS）。事务 ID 不参与，因为不同客户端 ID 不同但应答相同
+- **命中时**：把应答 ID 改写成客户端的 ID，并按已过秒数**递减所有记录 TTL**（不做递减会返回"过期"的 TTL，客户端缓存会集体早退）
+- **跳过伪记录**：EDNS0 OPT（type 41）的 TTL 字段是扩展 RCODE/标志位、恒为 0，参与计算会把整条应答误判成不可缓存 —— 这是实测踩出来的坑（doh.pub 的应答全带 OPT）
+- 只缓存 `rcode=0` 与 `rcode=3`；`rcode=3` 且无 SOA 的应答（无负缓存 TTL）不缓存
+- 单条 TTL = `min(记录最小 TTL, CACHE_MAX_TTL)`，过期即淘汰；LRU 按条数上限淘汰
+- 响应头 `X-Cache: HIT|MISS` 便于排障
+
+实测（日本源站本地，`/dnspod` 上游在国内约 200ms）：
+
+```
+第 1 次  0.215s  X-Cache: MISS
+第 2 次  0.0057s X-Cache: HIT
+第 3 次  0.0055s X-Cache: HIT     → 快约 39 倍
+```
+
+## 上游熔断与故障转移
+
+- 每个上游独立计数：连续失败 `CB_THRESHOLD` 次即熔断，冷却 `CB_COOLDOWN_SEC` 内不再尝试；冷却结束放行一次探测，成功即恢复
+- 判定失败：连接/超时错误，或上游返回 `5xx`
+- 熔断期间按 `FAILOVER_CHAIN` 顺序转移到下一个健康上游（同一请求内完成，客户端无感）
+- 全部上游都不可用时返回 `502/503 + Retry-After`
+- `/metrics` 的 `providers` 字段暴露每个上游的 `healthy` / `consecutive_failures`
 
 ## 与 Worker 版的差异
 

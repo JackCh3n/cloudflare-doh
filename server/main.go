@@ -22,8 +22,10 @@ package main
 
 import (
 	"bytes"
+	"container/list"
 	"context"
 	"crypto/tls"
+	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -69,6 +71,15 @@ type Config struct {
 	MemLimitMB      int // 软内存上限（debug.SetMemoryLimit），0 = 不限
 	ReadTimeoutSec  int // 读完整请求（含 body）超时，防 slow-loris
 	WriteTimeoutSec int // 写响应超时，防慢客户端占连接
+
+	// 内存缓存（热门域名命中走本地，微秒级）
+	CacheMaxTTL  int // 单条缓存最长保留秒数（同时是记录 TTL 的上限），0 = 关闭
+	CacheEntries int // LRU 条目数上限
+
+	// 上游熔断与故障转移
+	CBThreshold int           // 连续失败多少次熔断
+	CBCooldown  time.Duration // 熔断冷却时长
+	Failover    []string      // 请求的上游熔断后，按此顺序尝试其它上游
 }
 
 // defaultMappings 与 Worker 版保持一致
@@ -146,6 +157,25 @@ func loadConfig() Config {
 		MemLimitMB:      envInt("MEM_LIMIT_MB", 512),
 		ReadTimeoutSec:  envInt("READ_TIMEOUT_SEC", 20),
 		WriteTimeoutSec: envInt("WRITE_TIMEOUT_SEC", 60),
+		CacheMaxTTL:     envInt("CACHE_MAX_TTL", 300),
+		CacheEntries:    envInt("CACHE_ENTRIES", 10000),
+		CBThreshold:     envInt("CB_THRESHOLD", 5),
+		CBCooldown:      time.Duration(envInt("CB_COOLDOWN_SEC", 30)) * time.Second,
+	}
+
+	// 故障转移链：默认 cloudflare → google → adguard（全部海外可达且无过滤差异主嫌时可用）
+	chain := strings.TrimSpace(os.Getenv("FAILOVER_CHAIN"))
+	if chain == "" {
+		chain = "cloudflare,google,adguard"
+	}
+	for _, name := range strings.Split(chain, ",") {
+		if name = strings.Trim(strings.ToLower(name), "/ "); name != "" {
+			if m, ok := cfg.Mappings["/"+name]; ok && m.TargetDomain != "" {
+				cfg.Failover = append(cfg.Failover, name)
+			} else {
+				log.Printf("FAILOVER_CHAIN 里的 %q 不在映射表中，忽略", name)
+			}
+		}
 	}
 
 	if raw := strings.TrimSpace(os.Getenv("DOMAIN_MAPPINGS")); raw != "" {
@@ -212,8 +242,21 @@ func (c Config) hostAllowed(host string) bool {
 	return false
 }
 
-// resolveTarget 返回转发目标 URL；ok=false 表示不转发
-func (c Config) resolveTarget(path, rawQuery string) (string, bool) {
+// providerTarget 构造指定上游的 DoH 目标 URL（裸路径与故障转移共用）
+func (c Config) providerTarget(provider, rawQuery string) (string, bool) {
+	m, ok := c.Mappings["/"+strings.TrimPrefix(provider, "/")]
+	if !ok || m.TargetDomain == "" {
+		return "", false
+	}
+	u := "https://" + m.TargetDomain + "/dns-query"
+	if rawQuery != "" {
+		u += "?" + rawQuery
+	}
+	return u, true
+}
+
+// resolveTarget 返回（上游名, 转发目标 URL）；ok=false 表示不转发
+func (c Config) resolveTarget(path, rawQuery string) (string, string, bool) {
 	// 最长前缀优先
 	var prefix string
 	for p := range c.Mappings {
@@ -223,16 +266,19 @@ func (c Config) resolveTarget(path, rawQuery string) (string, bool) {
 	}
 
 	if prefix == "" {
+		// 兼容 https://域名/dns-query 这种「无前缀」的标准 DoH 写法
 		bare := strings.TrimRight(path, "/")
 		if bare == "/dns-query" || bare == "/query-dns" {
-			return c.bareTarget(rawQuery)
+			if u, ok := c.providerTarget(c.DefaultUpstream, rawQuery); ok {
+				return c.DefaultUpstream, u, true
+			}
 		}
-		return "", false
+		return "", "", false
 	}
 
 	m := c.Mappings[prefix]
 	if m.TargetDomain == "" {
-		return "", false
+		return "", "", false
 	}
 
 	rest := path[len(prefix):]
@@ -260,20 +306,7 @@ func (c Config) resolveTarget(path, rawQuery string) (string, bool) {
 	if rawQuery != "" {
 		u += "?" + rawQuery
 	}
-	return u, true
-}
-
-// bareTarget 构造裸路径的默认上游目标
-func (c Config) bareTarget(rawQuery string) (string, bool) {
-	m, ok := c.Mappings["/"+c.DefaultUpstream]
-	if !ok || m.TargetDomain == "" {
-		return "", false
-	}
-	u := "https://" + m.TargetDomain + "/dns-query"
-	if rawQuery != "" {
-		u += "?" + rawQuery
-	}
-	return u, true
+	return strings.TrimPrefix(prefix, "/"), u, true
 }
 
 // isDoHRequest 判断请求是否确实是 DoH 协议流量
@@ -281,6 +314,289 @@ func isDoHRequest(r *http.Request) bool {
 	a := strings.ToLower(r.Header.Get("Accept"))
 	ct := strings.ToLower(r.Header.Get("Content-Type"))
 	return strings.Contains(a, "application/dns-message") || strings.Contains(ct, "application/dns-message")
+}
+
+// ---------- DNS 报文解析（用于缓存键与 TTL 处理） ----------
+
+// parseDNSQuery 从查询报文提取（事务 ID, 缓存键）。
+// 缓存键 = flags + question 段（QNAME+QTYPE+QCLASS），不含事务 ID——
+// 不同客户端的 ID 不同但应答相同，命中后按客户端 ID 改写即可。
+func parseDNSQuery(body []byte) (uint16, []byte, bool) {
+	if len(body) < 17 { // 12 头 + 最短 question(1+4)
+		return 0, nil, false
+	}
+	if int(body[4])<<8|int(body[5]) != 1 { // QDCOUNT 必须为 1
+		return 0, nil, false
+	}
+	id := uint16(body[0])<<8 | uint16(body[1])
+	i := 12
+	for i < len(body) {
+		l := int(body[i])
+		if l == 0 {
+			i++
+			break
+		}
+		if l&0xC0 != 0 { // question 里不该有压缩指针
+			return 0, nil, false
+		}
+		i += 1 + l
+	}
+	if i+4 > len(body) {
+		return 0, nil, false
+	}
+	key := make([]byte, 0, 2+(i+4-12))
+	key = append(key, body[2], body[3]) // flags
+	key = append(key, body[12:i+4]...)  // question + qtype + qclass
+	return id, key, true
+}
+
+// rrNext 从 i 处解析一条 RR，返回（TTL 字段偏移, 记录类型, 下一记录偏移）
+func rrNext(b []byte, i int) (ttlOff, typ, next int, ok bool) {
+	if i >= len(b) {
+		return 0, 0, 0, false
+	}
+	if b[i]&0xC0 == 0xC0 { // 压缩指针名
+		i += 2
+	} else {
+		for i < len(b) {
+			l := int(b[i])
+			if l == 0 {
+				i++
+				break
+			}
+			if l&0xC0 != 0 {
+				return 0, 0, 0, false
+			}
+			i += 1 + l
+		}
+	}
+	if i+10 > len(b) {
+		return 0, 0, 0, false
+	}
+	typ = (int(b[i]) << 8) | int(b[i+1])
+	rdlen := (int(b[i+8]) << 8) | int(b[i+9])
+	return i + 4, typ, i + 10 + rdlen, true
+}
+
+// isPseudoRR EDNS0 OPT / TSIG / TKEY 不是真实资源记录，其 TTL 字段含义不同（OPT 恒为 0），
+// 参与 TTL 计算会把整条应答误判成不可缓存，必须跳过
+func isPseudoRR(typ int) bool {
+	return typ == 41 /* OPT */ || typ == 249 /* TKEY */ || typ == 250 /* TSIG */
+}
+
+// dnsSectionStart 返回应答记录区起始位置与 AN+NS+AR 记录总数
+func dnsSectionStart(b []byte) (int, int, bool) {
+	if len(b) < 12 {
+		return 0, 0, false
+	}
+	qd := (int(b[4]) << 8) | int(b[5])
+	i := 12
+	for q := 0; q < qd; q++ {
+		for i < len(b) {
+			l := int(b[i])
+			if l == 0 {
+				i++
+				break
+			}
+			if l&0xC0 != 0 { // 指针只可能出现在记录区，question 里遇到就按 2 字节跳过
+				i += 2
+				break
+			}
+			i += 1 + l
+		}
+		i += 4 // QTYPE + QCLASS
+	}
+	if i > len(b) {
+		return 0, 0, false
+	}
+	an := (int(b[6]) << 8) | int(b[7])
+	ns := (int(b[8]) << 8) | int(b[9])
+	ar := (int(b[10]) << 8) | int(b[11])
+	return i, an + ns + ar, true
+}
+
+// dnsMinTTL 返回应答里最小的记录 TTL；解析失败返回 -1
+func dnsMinTTL(b []byte) int {
+	start, count, ok := dnsSectionStart(b)
+	if !ok {
+		return -1
+	}
+	min := -1
+	i := start
+	for c := 0; c < count; c++ {
+		ttlOff, typ, next, ok2 := rrNext(b, i)
+		if !ok2 || ttlOff+4 > len(b) {
+			return -1
+		}
+		if !isPseudoRR(typ) {
+			ttl := int(b[ttlOff])<<24 | int(b[ttlOff+1])<<16 | int(b[ttlOff+2])<<8 | int(b[ttlOff+3])
+			if min < 0 || ttl < min {
+				min = ttl
+			}
+		}
+		i = next
+	}
+	return min
+}
+
+// decrementTTLs 把应答中所有记录 TTL 减去 sec（缓存命中时使用），返回新切片；
+// 解析失败时原样返回，宁可 TTL 偏大也不破坏报文
+func decrementTTLs(b []byte, sec int) []byte {
+	out := append([]byte(nil), b...)
+	start, count, ok := dnsSectionStart(out)
+	if !ok {
+		return b
+	}
+	i := start
+	for c := 0; c < count; c++ {
+		ttlOff, typ, next, ok2 := rrNext(out, i)
+		if !ok2 || ttlOff+4 > len(out) {
+			return b
+		}
+		if !isPseudoRR(typ) { // OPT 的 TTL 字段是扩展 RCODE/标志位，绝不能递减
+			ttl := int(out[ttlOff])<<24 | int(out[ttlOff+1])<<16 | int(out[ttlOff+2])<<8 | int(out[ttlOff+3])
+			if ttl > sec {
+				ttl -= sec
+			} else {
+				ttl = 0
+			}
+			out[ttlOff], out[ttlOff+1], out[ttlOff+2], out[ttlOff+3] = byte(ttl>>24), byte(ttl>>16), byte(ttl>>8), byte(ttl)
+		}
+		i = next
+	}
+	return out
+}
+
+// rewriteID 把应答的事务 ID 改成客户端的（缓存命中时使用）
+func rewriteID(b []byte, id uint16) []byte {
+	out := append([]byte(nil), b...)
+	out[0] = byte(id >> 8)
+	out[1] = byte(id)
+	return out
+}
+
+// ---------- LRU 应答缓存 ----------
+
+type cacheEntry struct {
+	key         string
+	body        []byte
+	contentType string
+	fetchedAt   time.Time
+	ttl         int // 有效秒数 = min(记录最小 TTL, CacheMaxTTL)
+}
+
+type dnsCache struct {
+	mu      sync.Mutex
+	max     int
+	ll      *list.List
+	entries map[string]*list.Element
+	hits    atomic.Uint64
+	misses  atomic.Uint64
+}
+
+func newDNSCache(maxEntries int) *dnsCache {
+	if maxEntries <= 0 {
+		return nil
+	}
+	return &dnsCache{
+		max:     maxEntries,
+		ll:      list.New(),
+		entries: make(map[string]*list.Element, maxEntries/4+8),
+	}
+}
+
+func (c *dnsCache) get(key string) (cacheEntry, bool) {
+	c.mu.Lock()
+	el, ok := c.entries[key]
+	if !ok {
+		c.mu.Unlock()
+		c.misses.Add(1)
+		return cacheEntry{}, false
+	}
+	e := el.Value.(cacheEntry)
+	c.ll.MoveToFront(el)
+	c.mu.Unlock()
+	if time.Since(e.fetchedAt) >= time.Duration(e.ttl)*time.Second {
+		c.evict(key)
+		c.misses.Add(1)
+		return cacheEntry{}, false
+	}
+	c.hits.Add(1)
+	return e, true
+}
+
+func (c *dnsCache) put(key string, e cacheEntry) {
+	e.key = key
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if el, ok := c.entries[key]; ok {
+		el.Value = e
+		c.ll.MoveToFront(el)
+		return
+	}
+	c.entries[key] = c.ll.PushFront(e)
+	for c.ll.Len() > c.max {
+		back := c.ll.Back()
+		if back == nil {
+			break
+		}
+		delete(c.entries, back.Value.(cacheEntry).key)
+		c.ll.Remove(back)
+	}
+}
+
+func (c *dnsCache) evict(key string) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	if el, ok := c.entries[key]; ok {
+		c.ll.Remove(el)
+		delete(c.entries, key)
+	}
+}
+
+func (c *dnsCache) len() int {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.ll.Len()
+}
+
+// ---------- 上游熔断器 ----------
+
+type providerHealth struct {
+	mu        sync.Mutex
+	fails     int
+	until     time.Time
+	threshold int
+	cooldown  time.Duration
+}
+
+// allow 是否允许尝试该上游（熔断冷却结束后放行一次探测请求）
+func (h *providerHealth) allow() bool {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if h.threshold <= 0 || h.fails < h.threshold {
+		return true
+	}
+	return time.Now().After(h.until)
+}
+
+func (h *providerHealth) record(ok bool) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	if ok {
+		h.fails = 0
+		return
+	}
+	h.fails++
+	if h.fails >= h.threshold {
+		h.until = time.Now().Add(h.cooldown)
+	}
+}
+
+func (h *providerHealth) snapshot() (healthy bool, fails int) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.fails < h.threshold, h.fails
 }
 
 // cacheControl 计算响应缓存策略；第二个返回值表示是否需要 Vary: Accept
@@ -312,6 +628,11 @@ type server struct {
 	rpsMu       sync.Mutex
 	windowStart time.Time
 	windowCount int
+
+	// 应答缓存与上游熔断
+	cache    *dnsCache
+	healthMu sync.Mutex
+	health   map[string]*providerHealth
 }
 
 func newServer(cfg Config) *server {
@@ -320,6 +641,12 @@ func newServer(cfg Config) *server {
 	}
 	if cfg.MaxConnsPerHost <= 0 {
 		cfg.MaxConnsPerHost = 64
+	}
+	if cfg.CBThreshold <= 0 {
+		cfg.CBThreshold = 5
+	}
+	if cfg.CBCooldown <= 0 {
+		cfg.CBCooldown = 30 * time.Second
 	}
 
 	// 传输层按 nginx 的连接复用思路调优：
@@ -340,12 +667,57 @@ func newServer(cfg Config) *server {
 			ClientSessionCache: tls.NewLRUClientSessionCache(128),
 		},
 	}
-	return &server{
+
+	s := &server{
 		cfg:       cfg,
 		client:    &http.Client{Transport: transport, Timeout: 15 * time.Second},
 		inFlight:  make(chan struct{}, cfg.MaxInFlight),
 		startedAt: time.Now(),
+		health:    make(map[string]*providerHealth),
 	}
+	if cfg.CacheMaxTTL > 0 {
+		s.cache = newDNSCache(cfg.CacheEntries)
+	}
+	for name := range cfg.Mappings {
+		s.health[strings.TrimPrefix(name, "/")] = &providerHealth{
+			threshold: cfg.CBThreshold,
+			cooldown:  cfg.CBCooldown,
+		}
+	}
+	return s
+}
+
+// healthFor 取上游健康状态（未知上游按需创建）
+func (s *server) healthFor(name string) *providerHealth {
+	s.healthMu.Lock()
+	defer s.healthMu.Unlock()
+	h, ok := s.health[name]
+	if !ok {
+		h = &providerHealth{threshold: s.cfg.CBThreshold, cooldown: s.cfg.CBCooldown}
+		s.health[name] = h
+	}
+	return h
+}
+
+// candidates 返回本次请求可尝试的上游顺序：首选 + 健康检查通过的转移链
+func (s *server) candidates(primary string) []string {
+	out := make([]string, 0, 1+len(s.cfg.Failover))
+	if s.healthFor(primary).allow() {
+		out = append(out, primary)
+	}
+	for _, f := range s.cfg.Failover {
+		if f == primary {
+			continue
+		}
+		if s.healthFor(f).allow() {
+			out = append(out, f)
+		}
+	}
+	if len(out) == 0 {
+		// 全部处于熔断冷却中：仍然尝试首选，避免把所有请求直接判死
+		out = append(out, primary)
+	}
+	return out
 }
 
 // tooManyRequests 全局限速（按秒窗口计数）
@@ -367,14 +739,33 @@ func (s *server) tooManyRequests() bool {
 func (s *server) writeMetrics(w http.ResponseWriter) {
 	w.Header().Set("Content-Type", "application/json; charset=utf-8")
 	w.Header().Set("Cache-Control", "no-store")
-	_ = json.NewEncoder(w).Encode(map[string]any{
+
+	providers := make(map[string]any, len(s.health))
+	s.healthMu.Lock()
+	for name, h := range s.health {
+		healthy, fails := h.snapshot()
+		providers[name] = map[string]any{"healthy": healthy, "consecutive_failures": fails}
+	}
+	s.healthMu.Unlock()
+
+	m := map[string]any{
 		"in_flight":       s.inFlightNum.Load(),
 		"total_requests":  s.totalReq.Load(),
 		"upstream_errors": s.totalErr.Load(),
 		"uptime_seconds":  int64(time.Since(s.startedAt).Seconds()),
 		"max_in_flight":   s.cfg.MaxInFlight,
 		"max_rps":         s.cfg.MaxRPS,
-	})
+		"providers":       providers,
+	}
+	if s.cache != nil {
+		m["cache_hits"] = s.cache.hits.Load()
+		m["cache_misses"] = s.cache.misses.Load()
+		m["cache_entries"] = s.cache.len()
+		m["cache_max_ttl"] = s.cfg.CacheMaxTTL
+	} else {
+		m["cache_entries"] = 0
+	}
+	_ = json.NewEncoder(w).Encode(m)
 }
 
 func (s *server) camo(w http.ResponseWriter) {
@@ -434,52 +825,133 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	target, ok := s.cfg.resolveTarget(r.URL.Path, r.URL.RawQuery)
+	provider, target, ok := s.cfg.resolveTarget(r.URL.Path, r.URL.RawQuery)
 	if !ok && (r.URL.Path == "/" || r.URL.Path == "") && isDoHRequest(r) {
-		target, ok = s.cfg.bareTarget(r.URL.RawQuery)
+		provider, target, ok = s.cfg.resolveTarget("/dns-query", r.URL.RawQuery)
 	}
 	if !ok {
 		s.camo(w)
 		return
 	}
 
-	var body io.Reader
-	bodyLen := 0
+	// 读请求体（DoH 报文很小，64KB 上限）
+	var bodyBuf []byte
 	if r.Method != http.MethodGet && r.Method != http.MethodHead {
 		buf, err := io.ReadAll(io.LimitReader(r.Body, maxBodyBytes))
 		if err != nil {
 			http.Error(w, "bad request body", http.StatusBadRequest)
 			return
 		}
-		body = bytes.NewReader(buf)
-		bodyLen = len(buf)
+		bodyBuf = buf
 	}
 
-	req, err := http.NewRequestWithContext(r.Context(), r.Method, target, body)
-	if err != nil {
-		http.Error(w, "bad target", http.StatusBadGateway)
-		return
+	// 组装缓存键（只对 wire 格式 DoH 查询缓存，JSON 查询不缓存）
+	cacheKey := ""
+	var reqID uint16
+	if s.cache != nil {
+		if id, qkey, ok := dohQueryOf(r, bodyBuf); ok {
+			reqID = id
+			cacheKey = provider + "|" + string(qkey)
+		}
 	}
-	req.Header = r.Header.Clone()
-	for _, h := range hopHeaders {
-		req.Header.Del(h)
-	}
-	req.Header.Del("Host")
-	req.Header.Del("Content-Length")
-	// 始终显式设置长度，避免 chunked 转发被部分 DoH 上游拒绝
-	req.ContentLength = int64(bodyLen)
 
-	resp, err := s.client.Do(req)
-	if err != nil {
+	// 命中内存缓存：改写 ID、递减 TTL 后直接返回
+	if cacheKey != "" {
+		if e, hit := s.cache.get(cacheKey); hit {
+			elapsed := int(time.Since(e.fetchedAt).Seconds())
+			out := rewriteID(decrementTTLs(e.body, elapsed), reqID)
+			s.writeViaHeaders(w, r, e.contentType)
+			w.Header().Set("X-Cache", "HIT")
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(out)
+			if s.cfg.Verbose {
+				log.Printf("%s %s%s -> cache HIT (%dB, %s)", r.Method, r.Host, r.URL.Path, len(out), time.Since(started).Round(time.Millisecond))
+			}
+			return
+		}
+	}
+
+	// 依次尝试：首选上游 → 故障转移链（熔断中的上游会被跳过）
+	var (
+		resp      *http.Response
+		usedURL   = target
+		lastErr   error
+		gotStatus int
+	)
+	for _, cand := range s.candidates(provider) {
+		attemptURL := target
+		if cand != provider {
+			u, ok2 := s.cfg.providerTarget(cand, r.URL.RawQuery)
+			if !ok2 {
+				continue
+			}
+			attemptURL = u
+		}
+
+		var body io.Reader
+		if bodyBuf != nil {
+			body = bytes.NewReader(bodyBuf)
+		}
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, attemptURL, body)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		req.Header = r.Header.Clone()
+		for _, h := range hopHeaders {
+			req.Header.Del(h)
+		}
+		req.Header.Del("Host")
+		req.Header.Del("Content-Length")
+		// 始终显式设置长度，避免 chunked 转发被部分 DoH 上游拒绝
+		req.ContentLength = int64(len(bodyBuf))
+
+		resp, err = s.client.Do(req)
+		if err != nil {
+			s.healthFor(cand).record(false)
+			lastErr = err
+			continue
+		}
+		if resp.StatusCode >= 500 {
+			// 上游 5xx 视为不可用，读完响应体以复用连接后转移
+			_, _ = io.Copy(io.Discard, io.LimitReader(resp.Body, maxBodyBytes))
+			resp.Body.Close()
+			s.healthFor(cand).record(false)
+			lastErr = fmt.Errorf("%s 返回 %d", cand, resp.StatusCode)
+			gotStatus = resp.StatusCode
+			resp = nil
+			continue
+		}
+		s.healthFor(cand).record(true)
+		usedURL = attemptURL
+		break
+	}
+
+	if resp == nil {
 		s.totalErr.Add(1)
 		if s.cfg.Verbose {
-			log.Printf("upstream failed: %s %s -> %v", r.Method, target, err)
+			log.Printf("upstream failed: %s %s -> %v", r.Method, target, lastErr)
 		}
 		w.Header().Set("Retry-After", "2")
-		http.Error(w, "upstream error", http.StatusBadGateway)
+		code := http.StatusBadGateway
+		if gotStatus != 0 {
+			code = http.StatusServiceUnavailable
+		}
+		http.Error(w, "upstream error", code)
 		return
 	}
 	defer resp.Body.Close()
+
+	// 可缓存响应先整段读出（DoH 应答极小），顺便落缓存
+	var cacheable []byte
+	if cacheKey != "" && resp.StatusCode == http.StatusOK {
+		if buf, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes)); err == nil {
+			cacheable = buf
+			if len(cacheable) <= maxBodyBytes {
+				s.storeCache(cacheKey, cacheable, resp.Header.Get("Content-Type"))
+			}
+		}
+	}
 
 	for k, vv := range resp.Header {
 		for _, v := range vv {
@@ -498,13 +970,89 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			w.Header().Set("Vary", "Accept")
 		}
 	}
+	if cacheKey != "" {
+		w.Header().Set("X-Cache", "MISS")
+	}
 
 	w.WriteHeader(resp.StatusCode)
-	n, _ := io.Copy(w, resp.Body)
+	var n int64
+	if cacheable != nil {
+		m, _ := w.Write(cacheable)
+		n = int64(m)
+	} else {
+		n, _ = io.Copy(w, resp.Body)
+	}
 
 	if s.cfg.Verbose {
-		log.Printf("%s %s%s -> %s %d (%dB, %s)", r.Method, r.Host, r.URL.Path, target, resp.StatusCode, n, time.Since(started).Round(time.Millisecond))
+		log.Printf("%s %s%s -> %s %d (%dB, %s)", r.Method, r.Host, r.URL.Path, usedURL, resp.StatusCode, n, time.Since(started).Round(time.Millisecond))
 	}
+}
+
+// writeViaHeaders 设置缓存命中响应的基础响应头
+func (s *server) writeViaHeaders(w http.ResponseWriter, r *http.Request, contentType string) {
+	h := w.Header()
+	if contentType != "" {
+		h.Set("Content-Type", contentType)
+	} else {
+		h.Set("Content-Type", "application/dns-message")
+	}
+	cc, needVary := s.cfg.cacheControl(r)
+	h.Set("Cache-Control", cc)
+	if needVary {
+		if v := h.Get("Vary"); v != "" {
+			h.Set("Vary", v+", Accept")
+		} else {
+			h.Set("Vary", "Accept")
+		}
+	}
+}
+
+// storeCache 判定并写入缓存：仅缓存 rcode=0/3 且有有效 TTL 的应答
+func (s *server) storeCache(key string, body []byte, contentType string) {
+	if s.cache == nil || len(body) < 12 || s.cfg.CacheMaxTTL <= 0 {
+		return
+	}
+	rcode := int(body[3] & 0x0F)
+	if rcode != 0 && rcode != 3 {
+		return
+	}
+	ttl := dnsMinTTL(body)
+	if ttl <= 0 {
+		return
+	}
+	if ttl > s.cfg.CacheMaxTTL {
+		ttl = s.cfg.CacheMaxTTL
+	}
+	if contentType == "" {
+		contentType = "application/dns-message"
+	}
+	s.cache.put(key, cacheEntry{
+		body:        append([]byte(nil), body...),
+		contentType: contentType,
+		fetchedAt:   time.Now(),
+		ttl:         ttl,
+	})
+}
+
+// dohQueryOf 提取（事务 ID, 缓存键）：POST 报文优先，其次 GET 的 ?dns= 参数
+func dohQueryOf(r *http.Request, body []byte) (uint16, []byte, bool) {
+	if len(body) > 0 {
+		if id, k, ok := parseDNSQuery(body); ok {
+			return id, k, true
+		}
+		return 0, nil, false
+	}
+	if v := r.URL.Query().Get("dns"); v != "" {
+		raw, err := base64.RawURLEncoding.DecodeString(v)
+		if err != nil {
+			raw, err = base64.URLEncoding.DecodeString(v)
+			if err != nil {
+				return 0, nil, false
+			}
+		}
+		return parseDNSQuery(raw)
+	}
+	return 0, nil, false
 }
 
 func main() {
