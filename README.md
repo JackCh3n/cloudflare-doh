@@ -8,10 +8,10 @@
 
 | 平台 | 入口文件 | 运行时 | 状态 |
 | --- | --- | --- | --- |
-| Cloudflare Workers（生产） | `_worker.js` | V8 Worker | 已验证（`doh.example.com`、`doh2.example.com`） |
+| Cloudflare Workers | `_worker.js` | V8 Worker | 已验证 |
 | Cloudflare Pages | `_worker.js`（Pages 高级模式） | V8 Worker | 已验证（已降级为备选） |
 | 腾讯 EdgeOne Pages | `middleware.js`（边缘中间件） | V8 Edge Middleware | 已验证（2026-10-31 线上部署通过） |
-| 自建服务器 + EdgeOne 加速 | `server/main.go` | Go 1.22 单进程 | 日本节点已上线（源站直连实测 ~110ms） |
+| 自建服务器 + EdgeOne 加速 | `server/main.go` | Go 1.22 单进程 | 已上线（源站直连实测 ~110ms） |
 
 ## 功能特点
 
@@ -47,6 +47,7 @@ cloudflare-doh/
 │   ├── pack-edgeone.mjs  # 生成手动上传目录 dist/edgeone（3 个文件）
 │   └── check-doh.mjs     # 线上自检：真实 DoH 查询并解析 A 记录
 ├── Dockerfile            # Go 版容器镜像（多阶段构建，amd64/arm64）
+├── .cnb.yml              # CNB（cnb.cool）构建配置：分支/tag 推送自动构建 Docker 制品
 ├── .github/
 │   └── workflows/
 │       └── release.yml   # 打 tag v* → 多平台二进制发 Releases + Docker 发 GHCR
@@ -91,7 +92,7 @@ cloudflare-doh/
 参照值（同一批查询的真实应答）：
 
 - `qq.com` → `123.150.76.218`、`203.205.254.157`、`113.108.81.189`（腾讯网）
-- `test2.example.com` → `76.76.21.21` / `76.76.21.103` / `76.76.21.104` / `76.76.21.123` / `76.76.21.164`（Vercel）
+- `test2.example.com` → `76.76.21.x` 段（Vercel 托管的测试域）
 
 结论：**Cloudflare Worker 是唯一六家上游全通的部署方式**（12/12，实测 1.0–3.1s，含 TLS 握手）。EdgeOne 侧三家都有短板：Quad9 全军覆没、Cloudflare 约一半成功率（且各站失败的域名还不一样）、Google / AdGuard 只在海外节点可用；只有 dnspod / alidns 在哪都稳。所以：**要全功能就用 Worker，EdgeOne 那套适合只跑国内上游的场景。**
 
@@ -163,7 +164,7 @@ npx wrangler deploy
 	"routes": [{ "pattern": "doh.example.com", "custom_domain": true }],
 	"cache": { "enabled": true },  // Workers Cache（需要 wrangler ≥ 4.69）
 	"vars": {
-		"ALLOWED_HOSTS": "doh.example.com,doh2.example.com",
+		"ALLOWED_HOSTS": "doh.example.com",
 		"CACHE_TTL": "30"
 	}
 }
@@ -179,7 +180,7 @@ npx wrangler deploy
 
 | 项 | 值 |
 | --- | --- |
-| 入口 | 主：`https://doh.example.com`　备：`https://doh2.example.com`（同一 Worker，两份证书） |
+| 入口 | 自定义域名（同一 Worker 可绑定多个域名，各自签发证书） |
 | workers.dev | 已关闭（API 回读 `enabled: false, previews_enabled: false`） |
 | 版本预览 URL | 已关闭 |
 | 旧 Pages 项目 | 已删除（`cloudflare-doh-5s9.pages.dev` 已 NXDOMAIN） |
@@ -273,7 +274,7 @@ dist/edgeone/
 - `GET /google/query-dns?name=example.com&type=A` → 转发成功（浏览器未带 DoH `accept` 头，上游返回 400，属预期）
 - `GET /does-not-exist/abc` → 伪装 404
 
-自定义域名（`dohcn.example.com`，EdgeOne 中国站）实测：
+自定义域名（`dohcn.example.com`，EdgeOne 中国站，示例）实测：
 
 - `GET /` → 伪装 404，说明域名 CNAME 到 `*.pages.dnsoe6.com` 后中间件正常执行
 - `POST /dnspod/query-dns`、`POST /alidns/query-dns`（`application/dns-message`）→ 200，返回合法 DNS 应答（`rcode=0`，2 条 A 记录，约 0.2s）
@@ -291,7 +292,7 @@ GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o doh-proxy .
 # 上传 + systemd（详见 server/README.md）
 ```
 
-已在腾讯云日本节点上线，并前置 **EdgeOne 加速**（加速域名 `dohj.example.com`，源站 HTTPS `203.0.113.10:8080`，自签证书 10 年）。上海客户端实测（POST 真实查询）：
+已在腾讯云日本节点上线（下文以加速域名 `dohj.example.com`、源站 `203.0.113.10:8080` 为例，源站自签证书 10 年）。上海客户端实测（POST 真实查询）：
 
 | 目标 | 耗时 |
 | --- | --- |
@@ -301,7 +302,7 @@ GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o doh-proxy .
 
 EdgeOne 侧配置：源站 `203.0.113.10`、协议 **HTTPS**、端口 `8080`、回源 Host 同加速域名；源站用自签证书即可（EdgeOne 不校验源站证书）。注意若回源协议选 HTTPS 而源站没 TLS，会直接 525。完整步骤见 **[server/README.md](server/README.md)**。
 
-一键部署脚本：`scripts\deploy-jp.bat`（Windows 侧交叉编译 + pscp 上传，需先 `set JP_SSH_PASS=...`）。
+一键部署脚本：`scripts\deploy-jp.bat`（Windows 侧交叉编译 + pscp 上传；需先 `set JP_HOST=... JP_PORT=... JP_SSH_PASS=...`）。
 
 #### 一键部署（Linux 服务器侧，通用）
 
@@ -353,7 +354,7 @@ curl http://127.0.0.1:8080/healthz
 # 容器内直接开 TLS（AdGuard Home 等只认 https 的客户端可用）
 docker run -d --name doh-proxy -p 8443:8080 \
   -v /opt/doh-proxy/tls:/tls:ro \
-  -e TLS_CERT=/tls/dohj.crt -e TLS_KEY=/tls/dohj.key \
+  -e TLS_CERT=/tls/server.crt -e TLS_KEY=/tls/server.key \
   -e ALLOWED_HOSTS=dohj.example.com \
   --restart unless-stopped ghcr.io/jackch3n/cloudflare-doh:latest
 ```
@@ -375,8 +376,8 @@ AdGuard Home 的 DoH 上游语法就是 `https://域名/路径`，它会以 `POS
 https://dohj.example.com/cloudflare/query-dns
 ```
 
-> 国外线路现状（108 实测 6 次）：`dohj.example.com`（EdgeOne→日本）0.23–0.33s；`doh.example.com`（Cloudflare Worker）0.60–3.09s。
-> 两者路径完全一致，把 `dohj.example.com` 换成 `doh.example.com` 即可切换，不要同时填。
+> 国外线路现状（108 实测 6 次）：自建 EdgeOne 加速入口（dohj.example.com）0.23–0.33s；Cloudflare Worker 入口（doh.example.com）0.60–3.09s。
+> 两者路径完全一致，把加速域名换成你的其它入口域名即可切换，不要同时填。
 
 「Bootstrap DNS 服务器」必须填明文 DNS（AdGuard Home 要靠它解析代理域名本身，不能用自己的 DoH 上游）：
 
@@ -434,22 +435,23 @@ node scripts/check-doh.mjs --host my-app.edgeone.dev --cookie "eo_token=xxx; eo_
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
+| 1.4.1 | 2026-11-01 | 新增 CNB 构建配置 `.cnb.yml`（分支/tag 推送自动构建 Docker 制品到 docker.cnb.cool）；全库移除个人部署信息（域名/IP/SSH 端口改为 doh.example.com 等占位示例），并重写历史 |
 | 1.4.0 | 2026-11-01 | 新增 Linux 一键部署脚本 `scripts/deploy-linux.sh`（Releases/本地二进制 → systemd，幂等，已有单元不覆盖）；GitHub Actions 自动发布：打 tag 构建多平台二进制到 Releases + 多架构 Docker 镜像到 GHCR（`ghcr.io/jackch3n/cloudflare-doh`）；README 移除赞助商广告并同步部署文档 |
 | 1.3.0 | 2026-11-01 | Go 版新增应答缓存（LRU + ID 改写 + TTL 递减 + 跳过 OPT，实测 215ms→5.5ms）与上游熔断/故障转移（连续失败熔断、冷却探测、FAILOVER_CHAIN 无缝切换）；systemd 增加 cgroup 硬护栏（768M/640M/200% CPU） |
 | 1.2.0 | 2026-11-01 | Go 版高并发加固：在途上限(503+Retry-After)、单上游连接背压、TLS 会话复用、全局限速、软内存上限、读写超时族、panic 隔离、Content-Length 显式化、/metrics 指标端点；经 EdgeOne 压测 200 请求/50 并发零错误 |
-| 1.1.2 | 2026-10-31 | 108 的 AGH 上游切换为「dns.pub 国内 + dohj.example.com 国外」并重启生效；实测 dohj 0.23–0.33s（example.com 为 0.60–3.09s）；文档同步推荐配置 |
-| 1.1.1 | 2026-10-31 | Go 版新增双监听（HTTP + TLS，`-tls-listen`）；日本节点启用自签 10 年证书（CN=dohj.example.com）并前置 EdgeOne 加速，上海侧 0.171–0.216s 稳定；修复 EdgeOne 回源 525；Host 白名单收紧至 dohj.example.com + 源站 IP |
-| 1.1.0 | 2026-10-31 | 新增 Go 版实现 `server/`（单文件、仅标准库、含单元测试）并部署到腾讯云日本节点 203.0.113.10:8080（systemd 托管）；源站直连实测 0.106–0.120s，远优于 Cloudflare Worker 的 0.885–3.706s；新增 scripts/deploy-jp.bat 与 scripts/doh-proxy.service |
-| 1.0.11 | 2026-10-31 | 新增备用入口 `doh2.example.com`（同一 Worker 双域名 + 双证书），ALLOWED_HOSTS 同步；docs 补双入口说明与「新增域名后本地解析不了多为 AGH 负缓存」的排查记录 |
+| 1.1.2 | 2026-10-31 | 108 的 AGH 上游切换为「dns.pub 国内 + 自建 EdgeOne 加速入口国外」并重启生效；实测自建入口 0.23–0.33s（Worker 入口为 0.60–3.09s）；文档同步推荐配置 |
+| 1.1.1 | 2026-10-31 | Go 版新增双监听（HTTP + TLS，`-tls-listen`）；日本节点启用自签 10 年证书并前置 EdgeOne 加速，上海侧 0.171–0.216s 稳定；修复 EdgeOne 回源 525；Host 白名单收紧至加速域名 + 源站 IP |
+| 1.1.0 | 2026-10-31 | 新增 Go 版实现 `server/`（单文件、仅标准库、含单元测试）并部署到腾讯云日本节点（systemd 托管）；源站直连实测 0.106–0.120s，远优于 Cloudflare Worker 的 0.885–3.706s；新增 scripts/deploy-jp.bat 与 scripts/doh-proxy.service |
+| 1.0.11 | 2026-10-31 | 新增备用入口域名（同一 Worker 双域名 + 双证书），ALLOWED_HOSTS 同步；docs 补双入口说明与「新增域名后本地解析不了多为 AGH 负缓存」的排查记录 |
 | 1.0.10 | 2026-10-31 | AGH 国内上游统一改为腾讯 doh.pub（去掉阿里），108 实测 qq.com / game.qq.com / pvp.qq.com 均返回腾讯云 CDN 就近节点 |
 | 1.0.9 | 2026-10-31 | 兼容裸路径：根路径 / 与 /dns-query、/query-dns 均可作为 DoH 端点（仅当请求头为 DoH 协议时转发，浏览器访问仍是伪装 404），新增 DEFAULT_UPSTREAM；docs/adguard-home.md 补 108 实机排查记录 |
 | 1.0.8 | 2026-10-31 | 新增 docs/adguard-home.md：google/cloudflare 延迟实测（cloudflare 更快）、国内直连与绕 Worker 对比、含腾讯游戏的完整分流清单；README 精简为结论 + 链接 |
-| 1.0.7 | 2026-10-31 | 迁移完成：删除 Pages 项目与旧域名，Worker 以 custom_domain 绑定唯一入口 `doh.example.com`，workers.dev 与版本预览关闭，Workers Cache 实测 MISS→HIT，六家上游 12/12 全通 |
+| 1.0.7 | 2026-10-31 | 迁移完成：删除 Pages 项目与旧域名，Worker 以 custom_domain 绑定唯一自定义入口域名，workers.dev 与版本预览关闭，Workers Cache 实测 MISS→HIT，六家上游 12/12 全通 |
 | 1.0.6 | 2026-10-31 | 新增 `ALLOWED_HOSTS`（只允许绑定域名访问）与 `CACHE_TTL`（Workers Cache 显式缓存策略）；wrangler 配置关闭 workers_dev 与 preview_urls 并启用 `cache.enabled`；README 补充 Worker 生产配置与缓存两个坑 |
 | 1.0.5 | 2026-10-31 | 新增 `scripts/check-doh.mjs` 线上自检脚本（真实 DoH 查询 + 解析 A 记录）；用 `qq.com` / `test2.example.com` 复测三个站点六家上游，README 实测表改为真实域名结果 |
-| 1.0.4 | 2026-10-31 | 补记国际版手动上传站点（`doh-preview.edgeone.dev`）实测结果：中间件被正确识别，Google / AdGuard / doh.pub / AliDNS 可达，Quad9 不可达、Cloudflare 不稳定 |
+| 1.0.4 | 2026-10-31 | 补记国际版手动上传站点实测结果：中间件被正确识别，Google / AdGuard / doh.pub / AliDNS 可达，Quad9 不可达、Cloudflare 不稳定 |
 | 1.0.3 | 2026-10-31 | 新增 `npm run pack:edgeone` 生成 3 文件手动上传目录 `dist/edgeone`（已在 EdgeOne 实测部署通过），README 补充控制台直接上传与国际版说明 |
-| 1.0.2 | 2026-10-31 | 新增 `-a overseas` 海外区域站点（`cloudflare-doh-overseas` / `makers-demo2`）并实测各上游可达性；README 补充双区域部署与项目 ID 对照 |
+| 1.0.2 | 2026-10-31 | 新增 `-a overseas` 海外区域站点（`cloudflare-doh-overseas`）并实测各上游可达性；README 补充双区域部署与项目 ID 对照 |
 | 1.0.1 | 2026-10-31 | 新增 `/dnspod`（doh.pub）、`/alidns`（dns.alidns.com）国内可达映射；补充 EdgeOne 大陆边缘的出网实测结论与 AdGuard Home 配置说明 |
 | 1.0.0 | 2026-10-31 | 抽取 `src/core.js` 共享核心，新增腾讯 EdgeOne Pages 中间件入口，冒烟测试替代原 vitest 模板测试 |
 

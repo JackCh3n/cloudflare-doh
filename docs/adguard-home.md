@@ -1,6 +1,6 @@
 # AdGuard Home 分流配置（配合本项目的 DoH 代理）
 
-> 实测时间：2026-10-31 · 客户端在中国大陆 · 代理为 Cloudflare Worker `https://doh.example.com`
+> 实测时间：2026-10-31 · 客户端在中国大陆 · 代理为 Cloudflare Worker（文中 `doh.example.com` 等均为占位示例，替换为你自己的部署域名）
 
 ## 一、先看数据：谁快
 
@@ -37,11 +37,11 @@
 
 ## 二、推荐配置（方案 A：速度优先，直接粘贴到「上游 DNS 服务器」）
 
-> 地址写法：国内走腾讯 `dns.pub`；国外走 **EdgeOne 加速的日本节点** `https://dohj.example.com`（2026-10-31 起 108 生产在用）。
+> 地址写法：国内走腾讯 `dns.pub`；国外走**自建 + EdgeOne 加速的日本节点**（2026-10-31 起 108 生产在用）。
 > `https://dohj.example.com`、`/dns-query`、`/query-dns` 也能直接用（自动走 `DEFAULT_UPSTREAM`，默认 cloudflare）。
 >
 > 备用入口：Cloudflare Worker 的 `https://doh.example.com` 与 `https://doh2.example.com` 仍可用，路径与 dohj 一致，
-> 但更慢（108 实测：dohj 0.23–0.33s，example.com 0.60–3.09s）。**不要把两个域名的同一条规则同时填进 AGH**——
+> 但更慢（108 实测：自建入口 0.23–0.33s，Worker 入口 0.60–3.09s）。**不要把两个域名的同一条规则同时填进 AGH**——
 > `upstream_mode: parallel` 会对同一查询发两遍，纯属浪费。
 
 ```
@@ -212,7 +212,7 @@ https://dohj.example.com/google/query-dns
 | 入口 | 证书 | 用途 |
 | --- | --- | --- |
 | `doh.example.com` | 主 | 日常使用 |
-| `doh2.example.com` | 备 | 某些网络解析 `example.com` 异常时切换 |
+| `doh2.example.com` | 备 | 某些网络解析主域异常时切换 |
 
 两者走同一个 Worker、同一份 `ALLOWED_HOSTS` 白名单、同一套缓存策略，路径写法完全一致，替换域名即可。
 
@@ -225,7 +225,7 @@ https://dohj.example.com/google/query-dns
 # 108 上看到的：NOERROR 但 0 条 answer，AUTHORITY 里的 SOA TTL 还在倒计时
 dig @127.0.0.1 doh2.example.com
 # 换公共 DNS 直查是正常的
-dig +short A doh2.example.com @8.8.8.8      # → 203.0.113.1 203.0.113.2
+dig +short A doh2.example.com @8.8.8.8      # → 203.0.113.1 203.0.113.2（示例 IP）
 # 绕过 DNS 直连，验证服务本身没问题
 curl --resolve doh2.example.com:443:203.0.113.1 https://doh2.example.com/
 ```

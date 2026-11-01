@@ -20,7 +20,7 @@
 	"preview_urls": false,
 
 	// 绑定的自定义域名（custom_domain 会自动创建 DNS 记录与证书）
-	// doh.example.com 为主入口；doh2.example.com 为备用入口（部分网络解析 example.com 有问题时可切换）
+	// 换成你自己的域名；可以绑定多个，备用入口便于主域解析异常时切换
 	"routes": [
 		{ "pattern": "doh.example.com", "custom_domain": true },
 		{ "pattern": "doh2.example.com", "custom_domain": true }

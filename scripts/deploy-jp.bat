@@ -2,14 +2,30 @@
 chcp 65001 >nul
 setlocal
 rem ============================================================
-rem  deploy-jp.bat - 交叉编译 Go 版并部署到日本节点
-rem  前置：已安装 go、PuTTY（plink/pscp），并设置环境变量 JP_SSH_PASS
-rem  用法：set JP_SSH_PASS=你的密码  &&  scripts\deploy-jp.bat
+rem  deploy-jp.bat - 交叉编译 Go 版并部署到自建服务器
+rem  前置：已安装 go、PuTTY（plink/pscp）
+rem  用法（服务器信息走环境变量，不写死在脚本里）：
+rem    set JP_HOST=你的服务器IP
+rem    set JP_PORT=SSH端口
+rem    set JP_USER=root          （可省，默认 root）
+rem    set JP_SSH_PASS=你的密码
+rem    scripts\deploy-jp.bat
 rem ============================================================
 
-set HOST=203.0.113.10
-set PORT=22
-set USER=root
+if "%JP_HOST%"=="" (
+    echo [error] 未设置 JP_HOST。
+    echo         例：set JP_HOST=1.2.3.4 ^&^& set JP_PORT=22 ^&^& set JP_SSH_PASS=密码 ^&^& scripts\deploy-jp.bat
+    exit /b 1
+)
+if "%JP_PORT%"=="" (
+    echo [error] 未设置 JP_PORT。
+    exit /b 1
+)
+if "%JP_USER%"=="" set JP_USER=root
+
+set HOST=%JP_HOST%
+set PORT=%JP_PORT%
+set USER=%JP_USER%
 set REMOTE_DIR=/opt/doh-proxy
 set PSCP=pscp.exe
 set PLINK=plink.exe
@@ -52,10 +68,10 @@ if errorlevel 1 (
 )
 
 echo [4/4] 健康检查 ...
-%PLINK% -ssh -P %PORT% -batch -pw %JP_SSH_PASS% %USER%@%HOST% "curl -sS -m 5 http://127.0.0.1:8080/healthz; echo"
+%PLINK% -ssh -P %PORT% -batch -pw %JP_SSH_PASS% %USER%@%HOST% "curl -ksS -m 5 https://127.0.0.1:8080/healthz || curl -sS -m 5 http://127.0.0.1:8080/healthz; echo"
 
 echo.
-echo 完成。公网验证：curl http://%HOST%:8080/healthz
+echo 完成。公网验证：curl -sk https://%HOST%:8080/healthz
 pause
 endlocal
 exit /b 0

@@ -1,6 +1,6 @@
 # Go 版 DoH 代理（server/）
 
-与仓库根目录的 Cloudflare Worker / EdgeOne 中间件**路由规则完全一致**的实现，用于部署在自有服务器（当前：腾讯云日本节点，前置 EdgeOne 加速）。
+与仓库根目录的 Cloudflare Worker / EdgeOne 中间件**路由规则完全一致**的实现，用于部署在自有服务器（下文域名与 IP 均为占位示例，替换为你自己的）。
 
 只依赖 Go 标准库，无第三方模块，编译产物约 5.5MB，单文件直接跑。
 
@@ -24,7 +24,7 @@ GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o doh-proxy .
 ./doh-proxy -listen :8080
 
 # 只开 HTTPS：-listen 指定的端口直接变 TLS
-./doh-proxy -listen :8080 -tls-cert /opt/doh-proxy/tls/dohj.crt -tls-key /opt/doh-proxy/tls/dohj.key
+./doh-proxy -listen :8080 -tls-cert /opt/doh-proxy/tls/server.crt -tls-key /opt/doh-proxy/tls/server.key
 
 # HTTP + HTTPS 双监听
 ./doh-proxy -listen :8080 -tls-listen :8444 -tls-cert ... -tls-key ...
@@ -121,16 +121,16 @@ TasksMax=512
 ## 部署到日本节点
 
 ```bash
-# 1. 上传二进制
-pscp -P 22 doh-proxy root@203.0.113.10:/tmp/doh-proxy
+# 1. 上传二进制（<SSH端口>/<服务器IP> 换成你自己的）
+pscp -P <SSH端口> doh-proxy root@203.0.113.10:/tmp/doh-proxy
 
 # 2. 安装
-ssh -p 22 root@203.0.113.10 "mkdir -p /opt/doh-proxy && install -m 0755 /tmp/doh-proxy /opt/doh-proxy/doh-proxy"
+ssh -p <SSH端口> root@203.0.113.10 "mkdir -p /opt/doh-proxy && install -m 0755 /tmp/doh-proxy /opt/doh-proxy/doh-proxy"
 
 # 3. 生成自签证书（10 年），见下一节
 # 4. 装 systemd 单元并启动
-scp -P 22 scripts/doh-proxy.service root@203.0.113.10:/etc/systemd/system/
-ssh -p 22 root@203.0.113.10 "systemctl daemon-reload && systemctl enable --now doh-proxy"
+scp -P <SSH端口> scripts/doh-proxy.service root@203.0.113.10:/etc/systemd/system/
+ssh -p <SSH端口> root@203.0.113.10 "systemctl daemon-reload && systemctl enable --now doh-proxy"
 
 # 5. 验证（源站已开 TLS）
 curl -k https://203.0.113.10:8080/healthz
@@ -148,13 +148,13 @@ curl -fsSL https://raw.githubusercontent.com/JackCh3n/cloudflare-doh/main/script
 
 也可以用 Docker：镜像 `ghcr.io/jackch3n/cloudflare-doh`（CI 打 tag 自动构建，amd64/arm64），用法见根目录 README「Docker 部署」。
 
-## 接入 EdgeOne 加速（已上线 `dohj.example.com`）
+## 接入 EdgeOne 加速（示例：`dohj.example.com`）
 
 EdgeOne（CDN/加速，不是 Pages）侧新建**加速域名**，源站指向日本节点：
 
 | 配置项 | 值 |
 | --- | --- |
-| 加速域名 | `dohj.example.com`（需已备案才能用中国大陆节点） |
+| 加速域名 | `dohj.example.com`（示例；需已备案才能用中国大陆节点） |
 | 源站 | `203.0.113.10` |
 | 源站协议 / 端口 | **HTTPS** / `8080` |
 | 回源 Host | 与加速域名一致 |
@@ -172,11 +172,11 @@ EdgeOne **不校验源站证书**——证据是：换证前源站证书已过�
 ```bash
 mkdir -p /opt/doh-proxy/tls
 openssl req -x509 -newkey rsa:2048 -nodes -days 3650 \
-  -keyout /opt/doh-proxy/tls/dohj.key -out /opt/doh-proxy/tls/dohj.crt \
+  -keyout /opt/doh-proxy/tls/server.key -out /opt/doh-proxy/tls/server.crt \
   -subj '/CN=dohj.example.com' \
   -addext 'subjectAltName=DNS:dohj.example.com,IP:203.0.113.10'
-chmod 600 /opt/doh-proxy/tls/dohj.key
-chmod 644 /opt/doh-proxy/tls/dohj.crt
+chmod 600 /opt/doh-proxy/tls/server.key
+chmod 644 /opt/doh-proxy/tls/server.crt
 ```
 
 systemd 里用 `-listen :8080 -tls-cert ... -tls-key ...`，即 `:8080` 直接变 HTTPS（`scripts/doh-proxy.service` 已按此配置）。
@@ -199,7 +199,7 @@ Environment=ALLOWED_HOSTS=dohj.example.com,203.0.113.10
 
 四家上游经 `dohj`：cloudflare 0.20s、google 0.26s、adguard 0.57s、dnspod 0.57s，全部 200。
 
-源站证书：`CN=dohj.example.com`，自签，2026-10-31 → 2036-10-28。
+源站证书：自签 10 年（CN 取加速域名）。
 
 ## 常见问题
 
