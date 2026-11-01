@@ -515,8 +515,9 @@ function decodeDnsParam(raw) {
 
 /**
  * 从请求中提取 DNS 查询（对齐 Go dohQueryOf）
- * 非GET/HEAD：解析请求体；GET/HEAD：解析 ?dns= 参数。
- * 解析失败返回 null（不缓存、不报错），JSON DoH 拿不到 wire 报文同样返回 null。
+ * 非GET/HEAD：优先解析请求体（解析失败不回退）；体为空时回退 ?dns= 参数。
+ * GET/HEAD：解析 ?dns= 参数。解析失败返回 null（不缓存、不报错），
+ * JSON DoH 拿不到 wire 报文同样返回 null。
  * @param {Request} request
  * @param {URL} url
  * @param {Uint8Array|null} bodyBuf 已读取的请求体（GET/HEAD 传 null）
@@ -525,7 +526,10 @@ function decodeDnsParam(raw) {
 function parseDohQuery(request, url, bodyBuf) {
 	const method = (request.method || 'GET').toUpperCase();
 	if (method !== 'GET' && method !== 'HEAD') {
-		return bodyBuf && bodyBuf.byteLength > 0 ? parseDohMessageKey(bodyBuf) : null;
+		if (bodyBuf && bodyBuf.byteLength > 0) {
+			return parseDohMessageKey(bodyBuf);
+		}
+		return parseDohMessageKey(decodeDnsParam(url.searchParams.get('dns'))); // 体为空：对齐 Go 回退 ?dns=
 	}
 	return parseDohMessageKey(decodeDnsParam(url.searchParams.get('dns')));
 }

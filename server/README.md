@@ -68,6 +68,7 @@ AdGuard Home 的 DoH 上游只接受 `https://`，所以想让 AGH 用它，必�
 | `client_body_timeout` / `send_timeout` | `ReadTimeout` / `WriteTimeout` |
 | `limit_req` | `MAX_RPS`（秒窗口计数） |
 | 大文件头攻击 | `MaxHeaderBytes` 16KB（DoH 头很小） |
+| 大请求体 | 超过 64KB 直接 413，不转发截断的畸形报文 |
 | panic 隔离 | 每请求 `recover`，单请求异常不断服务 |
 
 压测（经 EdgeOne 全链路，2026-11-01）：200 请求 / 50 并发，全部 200，零错误；压测后服务 RSS 13MB、CPU 0.2%，`/metrics` 显示 `upstream_errors: 0`。
