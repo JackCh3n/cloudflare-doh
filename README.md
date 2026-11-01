@@ -41,8 +41,15 @@ cloudflare-doh/
 │   ├── dev.bat           # 本地调试：杀旧进程 → 装依赖 → 启动 → 打开浏览器
 │   ├── kill-dev.bat      # 结束占用 8787/8088/6699 的调试进程
 │   ├── deploy-edgeone.bat# 一键部署到 EdgeOne Pages
+│   ├── deploy-jp.bat     # Windows 交叉编译 + 上传日本节点（plink/pscp）
+│   ├── deploy-linux.sh   # Linux 服务器一键部署（Releases/本地二进制 → systemd）
+│   ├── doh-proxy.service # systemd 单元模板
 │   ├── pack-edgeone.mjs  # 生成手动上传目录 dist/edgeone（3 个文件）
 │   └── check-doh.mjs     # 线上自检：真实 DoH 查询并解析 A 记录
+├── Dockerfile            # Go 版容器镜像（多阶段构建，amd64/arm64）
+├── .github/
+│   └── workflows/
+│       └── release.yml   # 打 tag v* → 多平台二进制发 Releases + Docker 发 GHCR
 ├── dist/edgeone/         # 手动上传产物（git 忽略，npm run pack:edgeone 生成）
 ├── docs/
 │   └── adguard-home.md   # AdGuard Home 分流配置、延迟实测、腾讯游戏等分流清单
@@ -294,7 +301,64 @@ GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o doh-proxy .
 
 EdgeOne 侧配置：源站 `203.0.113.10`、协议 **HTTPS**、端口 `8080`、回源 Host 同加速域名；源站用自签证书即可（EdgeOne 不校验源站证书）。注意若回源协议选 HTTPS 而源站没 TLS，会直接 525。完整步骤见 **[server/README.md](server/README.md)**。
 
-一键部署脚本：`scripts\deploy-jp.bat`（需先 `set JP_SSH_PASS=...`）。
+一键部署脚本：`scripts\deploy-jp.bat`（Windows 侧交叉编译 + pscp 上传，需先 `set JP_SSH_PASS=...`）。
+
+#### 一键部署（Linux 服务器侧，通用）
+
+除了从 Windows 推送，也可以直接在目标服务器上执行 `scripts/deploy-linux.sh`：自动下载 Release 二进制 → 安装到 `/opt/doh-proxy` → 按需生成自签证书 → 写 systemd 单元并启动 → 健康检查。脚本幂等，重复执行安全；**检测到已有单元文件时默认只替换二进制并重启，不覆盖已有配置**（`--force-unit` 才重写单元）。
+
+```bash
+# 直接管道执行（真·一键）
+curl -fsSL https://raw.githubusercontent.com/JackCh3n/cloudflare-doh/main/scripts/deploy-linux.sh | sudo bash
+
+# 或下载后执行
+wget -O deploy-linux.sh https://raw.githubusercontent.com/JackCh3n/cloudflare-doh/main/scripts/deploy-linux.sh
+sudo bash deploy-linux.sh                        # GitHub Releases 最新版
+sudo VERSION=v1.4.0 bash deploy-linux.sh         # 指定版本
+sudo bash deploy-linux.sh --file ./doh-proxy     # 本地二进制（内网/访问 GitHub 困难时）
+sudo bash deploy-linux.sh --no-tls               # 纯 HTTP（TLS 由前置 CDN 终结时）
+sudo ALLOWED_HOSTS=doh.example.com bash deploy-linux.sh
+```
+
+常用环境变量：`REPO`（默认 `JackCh3n/cloudflare-doh`）、`INSTALL_DIR`（`/opt/doh-proxy`）、`LISTEN`（`:8080`，配了证书自动变 HTTPS）、`TLS_CN`（自签证书 CN/SAN，默认主机名）、`ALLOWED_HOSTS`、`CACHE_TTL`、`HEALTH_PATH`、`METRICS_PATH` 等。改配置 = 编辑 `/etc/systemd/system/doh-proxy.service` 后 `systemctl daemon-reload && systemctl restart doh-proxy`。
+
+> GitHub 无法直连的环境：用 `--url` 指向镜像直链，或 `--file` 安装本地编译产物（如 Windows 上 `scripts\deploy-jp.bat` 交叉编译后 pscp 上传的产物）。
+
+#### GitHub Releases 二进制（CI 构建）
+
+给仓库打 `v*` 标签后，GitHub Actions 自动构建并发布：
+
+| 产物 | 说明 |
+| --- | --- |
+| `doh-proxy-linux-amd64` / `doh-proxy-linux-arm64` | 静态编译（仅标准库），可直接运行 |
+| `doh-proxy-windows-amd64.exe` | Windows 本地调试用 |
+| `SHA256SUMS` | 全部产物的 sha256 校验（`deploy-linux.sh` 会自动校验） |
+
+下载地址（`deploy-linux.sh` 默认来源）：
+
+```
+https://github.com/JackCh3n/cloudflare-doh/releases/latest/download/doh-proxy-linux-amd64
+```
+
+#### Docker 部署
+
+每次打 tag 自动构建多架构镜像（linux/amd64 + linux/arm64）发布到 GHCR：
+
+```bash
+# 最简启动（HTTP :8080，TLS 交给前置 CDN/反代终结）
+docker run -d --name doh-proxy -p 8080:8080 --restart unless-stopped \
+  ghcr.io/jackch3n/cloudflare-doh:latest
+curl http://127.0.0.1:8080/healthz
+
+# 容器内直接开 TLS（AdGuard Home 等只认 https 的客户端可用）
+docker run -d --name doh-proxy -p 8443:8080 \
+  -v /opt/doh-proxy/tls:/tls:ro \
+  -e TLS_CERT=/tls/dohj.crt -e TLS_KEY=/tls/dohj.key \
+  -e ALLOWED_HOSTS=dohj.example.com \
+  --restart unless-stopped ghcr.io/jackch3n/cloudflare-doh:latest
+```
+
+环境变量与 Go 版完全一致（`DOMAIN_MAPPINGS` / `ALLOWED_HOSTS` / `CACHE_TTL` / `MAX_INFLIGHT` ...，见 [server/README.md](server/README.md)）。注意：改 `LISTEN_ADDR` 时需同步覆盖容器健康检查（默认探测 `127.0.0.1:8080`）。
 
 ## 作为 AdGuard Home 上游使用
 
@@ -370,6 +434,7 @@ node scripts/check-doh.mjs --host my-app.edgeone.dev --cookie "eo_token=xxx; eo_
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
+| 1.4.0 | 2026-11-01 | 新增 Linux 一键部署脚本 `scripts/deploy-linux.sh`（Releases/本地二进制 → systemd，幂等，已有单元不覆盖）；GitHub Actions 自动发布：打 tag 构建多平台二进制到 Releases + 多架构 Docker 镜像到 GHCR（`ghcr.io/jackch3n/cloudflare-doh`）；README 移除赞助商广告并同步部署文档 |
 | 1.3.0 | 2026-11-01 | Go 版新增应答缓存（LRU + ID 改写 + TTL 递减 + 跳过 OPT，实测 215ms→5.5ms）与上游熔断/故障转移（连续失败熔断、冷却探测、FAILOVER_CHAIN 无缝切换）；systemd 增加 cgroup 硬护栏（768M/640M/200% CPU） |
 | 1.2.0 | 2026-11-01 | Go 版高并发加固：在途上限(503+Retry-After)、单上游连接背压、TLS 会话复用、全局限速、软内存上限、读写超时族、panic 隔离、Content-Length 显式化、/metrics 指标端点；经 EdgeOne 压测 200 请求/50 并发零错误 |
 | 1.1.2 | 2026-10-31 | 108 的 AGH 上游切换为「dns.pub 国内 + dohj.example.com 国外」并重启生效；实测 dohj 0.23–0.33s（example.com 为 0.60–3.09s）；文档同步推荐配置 |
@@ -391,16 +456,3 @@ node scripts/check-doh.mjs --host my-app.edgeone.dev --cookie "eo_token=xxx; eo_
 ## 许可协议
 
 本项目采用 [MIT 许可协议](LICENSE)。您可以自由地使用、修改和分发本代码，但需要在您的项目中包含原始许可证和版权声明。
-
-## 赞助商
-
-[宁屏去广告](https://www.nullprivate.com) - 可定制化个人 DNS 解析服务
-
-主要特性:
-
-- 智能广告及追踪器过滤
-- 内置DDNS 支持
-- 防沉迷配置
-- 支持按规则路由上游DNS
-
-详情请访问 [Null Private](https://www.nullprivate.com) 了解更多。

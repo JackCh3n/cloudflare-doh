@@ -15,6 +15,8 @@ go test ./...
 GOOS=linux GOARCH=amd64 go build -trimpath -ldflags="-s -w" -o doh-proxy .
 ```
 
+不想本地编译：给仓库打 `v*` 标签后，CI 会把 `doh-proxy-linux-amd64` / `doh-proxy-linux-arm64`、`doh-proxy-windows-amd64.exe` 与 `SHA256SUMS` 发到 [GitHub Releases](https://github.com/JackCh3n/cloudflare-doh/releases)，`scripts/deploy-linux.sh` 默认从这里下载。
+
 ## 运行
 
 ```bash
@@ -137,6 +139,14 @@ curl -k -X POST -H 'content-type: application/dns-message' -H 'accept: applicati
 ```
 
 一键脚本：`scripts\deploy-jp.bat`（需先 `set JP_SSH_PASS=...`）。
+
+服务器侧通用一键脚本 `scripts/deploy-linux.sh`（在目标服务器执行：自动下载 Release 二进制 → `/opt/doh-proxy` → 生成 systemd 单元 → 启动 → 健康检查；已有单元时默认只换二进制不覆盖配置，幂等可重复执行）：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JackCh3n/cloudflare-doh/main/scripts/deploy-linux.sh | sudo bash
+```
+
+也可以用 Docker：镜像 `ghcr.io/jackch3n/cloudflare-doh`（CI 打 tag 自动构建，amd64/arm64），用法见根目录 README「Docker 部署」。
 
 ## 接入 EdgeOne 加速（已上线 `dohj.example.com`）
 
