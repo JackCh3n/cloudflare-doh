@@ -51,7 +51,7 @@ cloudflare-doh/
 ├── .cnb.yml              # CNB（cnb.cool）构建配置：分支/tag 推送自动构建 Docker 制品
 ├── .github/
 │   └── workflows/
-│       └── release.yml   # 打 tag v* → 多平台二进制发 Releases + Docker 发 GHCR
+│       └── release.yml   # 推 main → 按 package.json 版本自动打 tag、发 Releases、推 GHCR
 ├── dist/edgeone/         # 手动上传产物（git 忽略，npm run pack:edgeone 生成）
 ├── docs/
 │   └── adguard-home.md   # AdGuard Home 分流配置、延迟实测、腾讯游戏等分流清单
@@ -353,15 +353,17 @@ sudo ALLOWED_HOSTS=doh.example.com bash deploy-linux.sh
 
 > GitHub 无法直连的环境：用 `--url` 指向镜像直链，或 `--file` 安装本地编译产物（如 Windows 上 `scripts\deploy-jp.bat` 交叉编译后 pscp 上传的产物）。
 
-#### GitHub Releases 二进制（CI 构建）
+#### GitHub Releases 二进制（CI 构建，版本号驱动）
 
-给仓库打 `v*` 标签后，GitHub Actions 自动构建并发布：
+**每次推送 `main` 都会构建并发版**——不存在“小修不发版”。流程：CI 读取 `package.json` 的 `version`（按规则每次提交递增），若该版本的 tag `vX.Y.Z` 尚不存在，就自动打 tag → 发 Release → 推版本化镜像；版本未变的推送（如纯文档）只跑测试并刷新 `edge` 镜像。手动 `git tag vX.Y.Z && git push origin vX.Y.Z` 也走同一发布路径。
 
 | 产物 | 说明 |
 | --- | --- |
 | `doh-proxy-linux-amd64` / `doh-proxy-linux-arm64` | 静态编译（仅标准库），可直接运行 |
 | `doh-proxy-windows-amd64.exe` | Windows 本地调试用 |
 | `SHA256SUMS` | 全部产物的 sha256 校验（`deploy-linux.sh` 会自动校验） |
+
+CI 还会先跑 `node test/smoke.mjs`（边缘版 48 项）与 `go vet && go test`，任一失败则不出产物。
 
 下载地址（`deploy-linux.sh` 默认来源）：
 
@@ -371,7 +373,7 @@ https://github.com/JackCh3n/cloudflare-doh/releases/latest/download/doh-proxy-li
 
 #### Docker 部署
 
-每次打 tag 自动构建多架构镜像（linux/amd64 + linux/arm64）发布到 GHCR：
+每次推送 `main` 自动构建多架构镜像（linux/amd64 + linux/arm64）发布到 GHCR，标签：`X.Y.Z`、`X.Y`、`latest`（发版时）、`edge`（每次 main 推送）、`sha-<短哈希>`。CNB 侧（`docker.cnb.cool/jackch3n/cloudflare-doh`）同样按 `package.json` 版本出 `X.Y.Z` / `X.Y` / `latest` / `<分支名>` 标签：
 
 ```bash
 # 最简启动（HTTP :8080，TLS 交给前置 CDN/反代终结）
@@ -463,6 +465,7 @@ node scripts/check-doh.mjs --host my-app.edgeone.dev --cookie "eo_token=xxx; eo_
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
+| 1.5.4 | 2026-11-02 | 发布流程改为版本号驱动：每次推送 main 按 `package.json` 版本自动打 tag → 发 Releases → 推版本化镜像（GHCR + CNB），不再要求手动打 tag，小修也必出可部署产物；CI 前置增加边缘版冒烟测试（48 项）门禁 |
 | 1.5.3 | 2026-11-02 | 第 3 轮终扫修复：JS 版 POST 空 body 时回退解析 `?dns=`（对齐 Go dohQueryOf，消除缓存命中面差异）；server/README 补 64KB 体上限说明；全量验证矩阵通过（JS 48 项/Go 全量/YAML/bash 语法/EdgeOne 三文件打包/三处伪装页逐字一致/残留 grep 干净） |
 | 1.5.2 | 2026-11-02 | 第 2 轮递归审核修复（JS/Go 逐行对照）：JS 记录名解析对齐 Go——非法标签长度字节（0x40/0x80）按解析失败处理；伪装 404 与错误应答补 `X-Content-Type-Options: nosniff`；上游多条 set-cookie 透传不再互相覆盖；`/metrics` 预登记全部映射上游（对齐 Go 的 providers 全量口径）；deploy-jp.bat 不再覆盖系统 USER 变量；冒烟测试 47→48 项 |
 | 1.5.1 | 2026-11-02 | 第 1 轮全量代码审核修复：JS 版 pathMapping 改为最长键前缀重写（原 replace 会误替换中间出现的目标，与 Go 版语义分歧）；Go 版请求体超 64KB 返回 413（原静默截断转发）、上游应答超 64KB 不再写截断体（消除客户端按 Content-Length 挂起风险）、读体失败返回 502；伪装 404 页修正 Windows/FINISHED 拼写、适配窄屏（max-width）、lang 改 zh-CN，三处副本逐字同步；deploy-linux.sh 自签证书 IPv4 SAN 误判修复；冒烟测试 46→47 项 |

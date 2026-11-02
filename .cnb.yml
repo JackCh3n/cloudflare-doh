@@ -1,34 +1,40 @@
 # ============================================================
 # .cnb.yml - CNB（cnb.cool）云原生构建配置
 # Docker 制品库：docker.cnb.cool/jackch3n/cloudflare-doh
-#   - 分支 push → :latest 与 :<分支名> 镜像
-#   - tag  push → :<tag>、:<去 v 的版本号> 与 :latest 镜像
+#
+# 发布模型：版本号驱动（与 GitHub Actions 一致），每次推送都出可部署的制品：
+#   - 分支 push → 读取 package.json 版本 X.Y.Z，推 :X.Y.Z、:X.Y、:latest、:<分支名>
+#                 （版本号按规则每次提交递增，所以每次修复都有对应版本的镜像）
+#   - tag  push → 以 tag 为准，推 :vX.Y.Z、:X.Y.Z、:X.Y、:latest
 # 说明：`$` 兜底所有未明确声明的分支；services: docker 已内置对
 #       docker.cnb.cool 的登录（CNB_TOKEN 自动注入），无需手动 docker login
 # ============================================================
 
 "$":
-  # 分支推送：构建 edge 镜像
   push:
-    - name: docker-edge
+    - name: docker-release
       runner:
         cpus: 4
       services:
         - docker
       stages:
-        - name: build & push (branch)
+        - name: build & push (branch, version from package.json)
           script: |
             set -e
             IMAGE="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}"
+            VER="$(sed -n 's/.*"version":[[:space:]]*"\([^"]*\)".*/\1/p' package.json | head -1)"
+            [ -n "$VER" ] || { echo "无法从 package.json 读取 version"; exit 1; }
+            MINOR="${VER%.*}"
             BRANCH_TAG="$(echo "${CNB_BRANCH}" | tr '/' '-')"
-            docker build -t "${IMAGE}:latest" -t "${IMAGE}:${BRANCH_TAG}" .
+            docker build -t "${IMAGE}:${VER}" -t "${IMAGE}:${MINOR}" -t "${IMAGE}:latest" -t "${IMAGE}:${BRANCH_TAG}" .
+            docker push "${IMAGE}:${VER}"
+            docker push "${IMAGE}:${MINOR}"
             docker push "${IMAGE}:latest"
             docker push "${IMAGE}:${BRANCH_TAG}"
-            echo "pushed: ${IMAGE}:latest ${IMAGE}:${BRANCH_TAG}"
+            echo "pushed: ${IMAGE}:${VER} ${IMAGE}:${MINOR} ${IMAGE}:latest ${IMAGE}:${BRANCH_TAG}"
 
-  # tag 推送：构建版本化镜像（v1.4.1 → :v1.4.1 :1.4.1 :latest）
   tag_push:
-    - name: docker-release
+    - name: docker-release-tag
       runner:
         cpus: 4
       services:
@@ -39,8 +45,10 @@
             set -e
             IMAGE="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}"
             VER="${CNB_BRANCH#v}"
-            docker build -t "${IMAGE}:${CNB_BRANCH}" -t "${IMAGE}:${VER}" -t "${IMAGE}:latest" .
+            MINOR="${VER%.*}"
+            docker build -t "${IMAGE}:${CNB_BRANCH}" -t "${IMAGE}:${VER}" -t "${IMAGE}:${MINOR}" -t "${IMAGE}:latest" .
             docker push "${IMAGE}:${CNB_BRANCH}"
             docker push "${IMAGE}:${VER}"
+            docker push "${IMAGE}:${MINOR}"
             docker push "${IMAGE}:latest"
-            echo "pushed: ${IMAGE}:${CNB_BRANCH} ${IMAGE}:${VER} ${IMAGE}:latest"
+            echo "pushed: ${IMAGE}:${CNB_BRANCH} ${IMAGE}:${VER} ${IMAGE}:${MINOR} ${IMAGE}:latest"

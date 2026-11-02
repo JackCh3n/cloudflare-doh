@@ -1,7 +1,11 @@
 name: Release
 
-# 打 v* 标签 → 多平台二进制发 GitHub Releases + 多架构 Docker 镜像发 GHCR；
-# push 到 main → 仅构建 Docker edge 镜像；支持手动触发。
+# 发布模型：版本号驱动（版本号来自 package.json，按规则每次提交递增）
+#   push 到 main → 读取 package.json 版本：
+#     - 该版本的 tag 尚不存在 → 自动打 tag vX.Y.Z → 发 Releases（二进制 + SHA256SUMS）
+#                               + 推 GHCR 镜像 :X.Y.Z / :X.Y / :latest / :edge
+#     - 该版本已发过（纯文档提交等）→ 只跑 test/编译验证 + 更新 :edge 镜像，不重复发版
+#   手动 push 的 v* tag → 同样走完整发布（与自动打 tag 路径一致）
 on:
   push:
     tags: ['v*']
@@ -9,17 +13,59 @@ on:
   workflow_dispatch:
 
 permissions:
-  contents: write # 创建 Release
+  contents: write # 创建 tag / Release
   packages: write # 推送 GHCR
 
 env:
   GO_VERSION: '1.22'
 
 jobs:
+  # 决定本次是否发版：解析 package.json 版本，判断对应 tag 是否已存在
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.v.outputs.version }}
+      minor: ${{ steps.v.outputs.minor }}
+      tag: ${{ steps.v.outputs.tag }}
+      release: ${{ steps.v.outputs.release }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - id: v
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "${GITHUB_REF}" == refs/tags/v* ]]; then
+            # 手动打的 tag：直接以 tag 为准
+            TAG="${GITHUB_REF#refs/tags/}"
+            VERSION="${TAG#v}"
+            RELEASE=true
+          else
+            VERSION="$(node -p "require('./package.json').version")"
+            TAG="v${VERSION}"
+            if git rev-parse -q --verify "refs/tags/${TAG}" >/dev/null; then
+              echo "tag ${TAG} 已存在，本次不发版（只做验证 + edge 镜像）"
+              RELEASE=false
+            else
+              RELEASE=true
+            fi
+          fi
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "minor=${VERSION%.*}" >> "$GITHUB_OUTPUT"
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "release=${RELEASE}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION} tag=${TAG} release=${RELEASE}"
+
   test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: smoke test (Worker/EdgeOne core)
+        run: node test/smoke.mjs
       - uses: actions/setup-go@v5
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -61,11 +107,13 @@ jobs:
           name: doh-proxy-${{ matrix.goos }}-${{ matrix.goarch }}
           path: dist/release/*
 
+  # 版本有变化即发版：自动打 tag（分支触发时）+ 创建 Release
   release:
-    needs: binaries
-    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [version, binaries]
+    if: needs.version.outputs.release == 'true'
     runs-on: ubuntu-latest
     steps:
+      - uses: actions/checkout@v4
       - uses: actions/download-artifact@v4
         with:
           path: dist/release
@@ -73,13 +121,22 @@ jobs:
       - name: Generate SHA256SUMS
         working-directory: dist/release
         run: sha256sum * > SHA256SUMS
+      - name: Create tag (branch-triggered)
+        if: startsWith(github.ref, 'refs/heads/')
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag -a "${{ needs.version.outputs.tag }}" -m "Release ${{ needs.version.outputs.tag }}"
+          git push origin "${{ needs.version.outputs.tag }}"
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          name: ${{ needs.version.outputs.tag }}
           files: dist/release/*
           generate_release_notes: true
 
   docker:
-    needs: test
+    needs: [version, test]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -96,11 +153,12 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ghcr.io/${{ github.repository }}
+          # 发版时：X.Y.Z / X.Y / latest；始终：edge（main）/ sha
           tags: |
-            type=semver,pattern={{version}}
-            type=semver,pattern={{major}}.{{minor}}
-            type=raw,value=latest,enable=${{ startsWith(github.ref, 'refs/tags/v') }}
-            type=edge,enable=${{ github.ref == 'refs/heads/main' }}
+            type=raw,value=${{ needs.version.outputs.version }},enable=${{ needs.version.outputs.release == 'true' }}
+            type=raw,value=${{ needs.version.outputs.minor }},enable=${{ needs.version.outputs.release == 'true' }}
+            type=raw,value=latest,enable=${{ needs.version.outputs.release == 'true' }}
+            type=raw,value=edge,enable=${{ github.ref == 'refs/heads/main' }}
             type=sha
       - name: Build and push
         uses: docker/build-push-action@v6
