@@ -1,6 +1,6 @@
 {
 	"name": "cloudflare-doh",
-	"version": "1.5.4",
+	"version": "1.5.5",
 	"private": true,
 	"type": "module",
 	"description": "路径转发的 DNS over HTTPS (DoH) 反向代理，支持 Cloudflare Workers/Pages 与腾讯 EdgeOne Pages",
@@ -15,6 +15,6 @@
 		"check:doh": "node scripts/check-doh.mjs"
 	},
 	"devDependencies": {
-		"wrangler": "^3.114.1"
+		"wrangler": "^4.159.0"
 	}
 }

@@ -43,7 +43,18 @@
 		"CACHE_TTL": "30"
 	},
 
+	// 可观测性：Workers Logs + 自动追踪（Traces）+ 异常聚合（Issues）
+	// - enabled:      采集 invokeLogs（console 输出与未捕获异常），Dashboard → Workers → Logs 查看
+	// - traces:       自动分布式追踪（fetch/子请求 span，open beta），Dashboard → Traces 查看；
+	//                 wrangler 4.x 会自动上传 source map，堆栈直接显示 src/core.js 的原始行号
+	// - issues:       运行时异常自动聚合分组（需 wrangler ≥ 4.134），Dashboard → Workers → Issues 查看
 	"observability": {
-		"enabled": true
+		"enabled": true,
+		"traces": {
+			"enabled": true
+		},
+		"issues": {
+			"enabled": true
+		}
 	}
 }

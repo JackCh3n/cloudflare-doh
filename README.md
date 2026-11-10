@@ -465,6 +465,7 @@ node scripts/check-doh.mjs --host my-app.edgeone.dev --cookie "eo_token=xxx; eo_
 
 | 版本 | 日期 | 说明 |
 | --- | --- | --- |
+| 1.5.5 | 2026-11-10 | Worker 开启可观测性全家桶：`observability.traces`（自动分布式追踪，open beta）与 `observability.issues`（运行时异常聚合，需 wrangler ≥ 4.134）；wrangler 升级 3.114 → 4.159，dry-run 验证通过 |
 | 1.5.4 | 2026-11-02 | 发布流程改为版本号驱动：每次推送 main 按 `package.json` 版本自动打 tag → 发 Releases → 推版本化镜像（GHCR + CNB），不再要求手动打 tag，小修也必出可部署产物；CI 前置增加边缘版冒烟测试（48 项）门禁 |
 | 1.5.3 | 2026-11-02 | 第 3 轮终扫修复：JS 版 POST 空 body 时回退解析 `?dns=`（对齐 Go dohQueryOf，消除缓存命中面差异）；server/README 补 64KB 体上限说明；全量验证矩阵通过（JS 48 项/Go 全量/YAML/bash 语法/EdgeOne 三文件打包/三处伪装页逐字一致/残留 grep 干净） |
 | 1.5.2 | 2026-11-02 | 第 2 轮递归审核修复（JS/Go 逐行对照）：JS 记录名解析对齐 Go——非法标签长度字节（0x40/0x80）按解析失败处理；伪装 404 与错误应答补 `X-Content-Type-Options: nosniff`；上游多条 set-cookie 透传不再互相覆盖；`/metrics` 预登记全部映射上游（对齐 Go 的 providers 全量口径）；deploy-jp.bat 不再覆盖系统 USER 变量；冒烟测试 47→48 项 |
