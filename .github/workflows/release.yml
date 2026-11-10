@@ -117,6 +117,9 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: dist/release
+          # 只取二进制产物：不加 pattern 会把 docker buildx 的 gha 缓存产物
+          # （JackCh3n~...~*.dockerbuild）一起下载，导致解压失败
+          pattern: doh-proxy-*
           merge-multiple: true
       - name: Generate SHA256SUMS
         working-directory: dist/release
