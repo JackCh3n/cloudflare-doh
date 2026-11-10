@@ -464,7 +464,7 @@ node scripts/check-doh.mjs --host my-app.edgeone.dev --cookie "eo_token=xxx; eo_
 
 ## 版本记录
 
-当前版本 **1.12.0**（2026-11-10）。完整历史见 **[CHANGELOG.md](CHANGELOG.md)**。
+当前版本 **1.17.0**（2026-11-11）。完整历史见 **[CHANGELOG.md](CHANGELOG.md)**。
 
 > 版本号遵循 SemVer，单一来源为 `package.json`，发布时打 `vX.Y.Z` tag 并由 CI 自动发布 Release 制品；纯文档/CI 改动不升版本。
 
