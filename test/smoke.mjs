@@ -10,6 +10,9 @@
  */
 
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 import {
 	proxyRequest,
 	resolveTarget,
@@ -19,6 +22,7 @@ import {
 	decrementTTLs,
 	rewriteID,
 	createEdgeState,
+	HOMEPAGE_HTML,
 	DEFAULT_PATH_MAPPINGS,
 } from '../src/core.js';
 import cfWorker from '../_worker.js';
@@ -679,6 +683,71 @@ await check('createEdgeState 默认值：缓存开启、链默认三家', () => 
 	assert.notEqual(s.cache, null);
 	assert.deepEqual(s.failoverChain, ['cloudflare', 'google', 'adguard']);
 	assert.equal(s.cacheMaxTtl, 300);
+});
+
+await check('DEFAULT_UPSTREAM 大小写不敏感（对齐 Go 的 ToLower）', () => {
+	assert.equal(
+		resolveTarget(new URL('https://x.dev/dns-query?dns=abc'), { DEFAULT_UPSTREAM: 'GOOGLE' }).targetUrl,
+		'https://dns.google/dns-query?dns=abc'
+	);
+	assert.equal(
+		resolveTarget(new URL('https://x.dev/dns-query?dns=abc'), { DEFAULT_UPSTREAM: '/AdGuard' }).targetUrl,
+		'https://dns.adguard-dns.com/dns-query?dns=abc'
+	);
+});
+
+await check('压缩指针名字的应答可正常计算/递减 TTL（对齐 Go cache_test 的 0xC00C 场景）', () => {
+	// header(12) + question qq.com(8B qname + 4) + RR(name=0xC00C 指向 question, A, ttl=300, rdlen=4)
+	const qname = [2, 0x71, 0x71, 3, 0x63, 0x6f, 0x6d, 0]; // qq.com
+	const rr = [0xc0, 0x0c, 0, 1, 0, 1, 0, 0, 1, 0x2c, 0, 4, 1, 2, 3, 4]; // ttl=300
+	const b = new Uint8Array(12 + qname.length + 4 + rr.length);
+	const dv = new DataView(b.buffer);
+	dv.setUint16(2, 0x8180);
+	dv.setUint16(4, 1); // QDCOUNT
+	dv.setUint16(6, 1); // ANCOUNT
+	b.set(qname, 12);
+	dv.setUint16(12 + qname.length, 1); // QTYPE A
+	dv.setUint16(12 + qname.length + 2, 1); // QCLASS IN
+	b.set(rr, 12 + qname.length + 4);
+	assert.equal(dnsMinTTL(b), 300);
+	const out = decrementTTLs(b, 100);
+	assert.equal(dnsMinTTL(out), 200);
+	// 指针字节本身不得被改动
+	assert.deepEqual(Array.from(out.slice(12 + qname.length + 4, 12 + qname.length + 6)), [0xc0, 0x0c]);
+});
+
+await check('请求体读取失败返回 400（对齐 Go，而不是未处理拒绝）', async () => {
+	const state = createEdgeState({});
+	const req = new Request('https://x.dev/cloudflare/query-dns', {
+		method: 'POST',
+		headers: { 'content-type': 'application/dns-message' },
+		body: makeDnsQuery(1),
+	});
+	await req.body.cancel(); // 模拟客户端中断，使 arrayBuffer() reject
+	const r = await proxyRequest(req, { env: {}, fetchImpl: () => { throw new Error('不应发起请求'); }, state });
+	assert.equal(r.status, 400);
+});
+
+await check('伪装 404 页三处副本逐字一致（core.js / index.html / main.go）', async () => {
+	const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+	const coreSrc = await readFile(path.join(root, 'src', 'core.js'), 'utf8');
+	const goSrc = await readFile(path.join(root, 'server', 'main.go'), 'utf8');
+	const html = (await readFile(path.join(root, 'index.html'), 'utf8')).trim();
+	const jsHtml = coreSrc.match(/HOMEPAGE_HTML = `([\s\S]*?)`;/)[1].trim();
+	const goHtml = goSrc.match(/homepageHTML = `([\s\S]*?)`/)[1].trim();
+	assert.equal(jsHtml, html, 'core.js 与 index.html 不一致');
+	assert.equal(goHtml, html, 'main.go 与 index.html 不一致');
+	// 伪装细节守卫：按钮可点击、标题随域名、Windows 拼写正确
+	assert.match(html, /location\.reload\(\)/);
+	assert.match(html, /document\.title = location\.host/);
+	assert.doesNotMatch(html, /Windos |FINSHED/);
+});
+
+await check('HOMEPAGE_HTML 导出与 index.html 一致（入口直用场景）', () => {
+	const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+	// HOMEPAGE_HTML 已在上方导入；这里只做快速一致性冒烟（完整三处守卫见上一用例）
+	assert.equal(typeof HOMEPAGE_HTML, 'string');
+	assert.match(HOMEPAGE_HTML, /无法访问此网站/);
 });
 
 console.log(`\n通过 ${passed} 项，失败 ${failures.length} 项`);

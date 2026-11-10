@@ -74,7 +74,12 @@ export const HOMEPAGE_HTML = `<!DOCTYPE html>
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>404</title>
+    <script>document.title = location.host || '404';</script>
     <style>
+        body{
+            font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+        }
         .main{
             width: 600px;
             max-width: 92%;
@@ -115,7 +120,7 @@ export const HOMEPAGE_HTML = `<!DOCTYPE html>
         <p>检查是否有拼写错误。</p>
         <p>如果拼写无误，请<span>尝试运行 Windows 网络诊断</span>。</p>
         <p style="font-size:12px;">DNS_PROBE_FINISHED_NXDOMAIN</p>
-        <button>重新加载</button>
+        <button onclick="location.reload()">重新加载</button>
     </div>
 
 </body>
@@ -224,7 +229,8 @@ const BARE_DOH_PATHS = ['/dns-query', '/query-dns'];
  * @returns {{prefix: string, targetDomain: string, targetUrl: string}|null}
  */
 export function bareDohTarget(url, env) {
-	const name = String((env && env.DEFAULT_UPSTREAM) || 'cloudflare').replace(/^\/+/, '');
+	// 小写归一对齐 Go（loadConfig 对 DEFAULT_UPSTREAM 做 ToLower），避免大写配置 404
+	const name = String((env && env.DEFAULT_UPSTREAM) || 'cloudflare').replace(/^\/+/, '').toLowerCase();
 	const mapping = getPathMappings(env)[`/${name}`];
 	if (!mapping || !mapping.targetDomain) return null;
 	return {
@@ -784,17 +790,24 @@ export async function proxyRequest(request, options = {}) {
 
 	const method = (request.method || 'GET').toUpperCase();
 
-	// 读取请求体（GET/HEAD 无体；上限对齐 Go maxBodyBytes）
+	// 读取请求体（GET/HEAD 无体；上限对齐 Go maxBodyBytes；读体失败返回 400 对齐 Go）
 	let bodyBuf = null;
 	if (method !== 'GET' && method !== 'HEAD') {
-		bodyBuf = new Uint8Array(await request.arrayBuffer());
+		try {
+			bodyBuf = new Uint8Array(await request.arrayBuffer());
+		} catch (error) {
+			return plainResponse(400, 'bad request body');
+		}
 		if (bodyBuf.byteLength > MAX_BODY_BYTES) {
 			return plainResponse(413, 'request body too large');
 		}
 	}
 
 	// 缓存键：provider 名 + DNS 报文键；JSON DoH / 解析失败 → 无键（不缓存、无 X-Cache）
-	const provider = target.prefix === '/' ? String((env && env.DEFAULT_UPSTREAM) || 'cloudflare').replace(/^\/+/, '') : target.prefix.slice(1);
+	const provider =
+		target.prefix === '/'
+			? String((env && env.DEFAULT_UPSTREAM) || 'cloudflare').replace(/^\/+/, '').toLowerCase()
+			: target.prefix.slice(1);
 	const parsed = parseDohQuery(request, url, bodyBuf);
 	const cacheKey = parsed && state.cache ? `${provider}|${bytesToHex(parsed.keyBytes)}` : null;
 

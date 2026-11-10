@@ -100,7 +100,12 @@ const homepageHTML = `<!DOCTYPE html>
     <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>404</title>
+    <script>document.title = location.host || '404';</script>
     <style>
+        body{
+            font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+            margin: 0;
+        }
         .main{
             width: 600px;
             max-width: 92%;
@@ -141,7 +146,7 @@ const homepageHTML = `<!DOCTYPE html>
         <p>检查是否有拼写错误。</p>
         <p>如果拼写无误，请<span>尝试运行 Windows 网络诊断</span>。</p>
         <p style="font-size:12px;">DNS_PROBE_FINISHED_NXDOMAIN</p>
-        <button>重新加载</button>
+        <button onclick="location.reload()">重新加载</button>
     </div>
 
 </body>
