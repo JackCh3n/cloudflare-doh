@@ -11,19 +11,21 @@ import (
 
 // stubTransport 记录发往上游的请求并返回固定响应
 type stubTransport struct {
-	lastURL    string
-	lastMethod string
-	lastBody   string
-	lastAccept string
-	lastLength int64
-	resp       *http.Response
-	err        error
+	lastURL            string
+	lastMethod         string
+	lastBody           string
+	lastAccept         string
+	lastLength         int64
+	lastAcceptEncoding string
+	resp               *http.Response
+	err                error
 }
 
 func (s *stubTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	s.lastURL = r.URL.String()
 	s.lastMethod = r.Method
 	s.lastAccept = r.Header.Get("Accept")
+	s.lastAcceptEncoding = r.Header.Get("Accept-Encoding")
 	s.lastLength = r.ContentLength
 	if r.Body != nil {
 		b, _ := io.ReadAll(r.Body)
@@ -42,9 +44,9 @@ func (s *stubTransport) RoundTrip(r *http.Request) (*http.Response, error) {
 	}, nil
 }
 
-func testServer(cfg Config, st *stubTransport) *server {
+func testServer(cfg Config, rt http.RoundTripper) *server {
 	s := newServer(cfg)
-	s.client = &http.Client{Transport: st}
+	s.client = &http.Client{Transport: rt}
 	return s
 }
 
@@ -357,5 +359,97 @@ func TestLargeUpstreamResponseNotTruncated(t *testing.T) {
 	}
 	if rec.Body.Len() != len(big) {
 		t.Fatalf("应答被截断：收到 %d 字节，期望 %d", rec.Body.Len(), len(big))
+	}
+}
+
+// brokenBodyReader 先吐出部分字节再报错，模拟上游响应体中途断流
+type brokenBodyReader struct{ done bool }
+
+func (r *brokenBodyReader) Read(p []byte) (int, error) {
+	if r.done {
+		return 0, io.ErrUnexpectedEOF
+	}
+	r.done = true
+	return copy(p, "\x00\x01partial"), nil
+}
+
+// failoverSeqTransport 按调用次序返回预设响应：第 1 个响应体中途断流，第 2 个正常
+type failoverSeqTransport struct {
+	urls  []string
+	calls int
+}
+
+func (s *failoverSeqTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	s.calls++
+	s.urls = append(s.urls, r.URL.String())
+	if s.calls == 1 {
+		return &http.Response{
+			StatusCode: 200,
+			Header:     http.Header{"Content-Type": []string{"application/dns-message"}},
+			Body:       io.NopCloser(&brokenBodyReader{}),
+		}, nil
+	}
+	return &http.Response{
+		StatusCode: 200,
+		Header:     http.Header{"Content-Type": []string{"application/dns-message"}},
+		Body:       io.NopCloser(strings.NewReader("dns-binary")),
+	}, nil
+}
+
+// 上游响应体中途断流：应把该上游记为失败并转移到下一候选（对齐边缘版），而不是直接 502
+func TestFailoverOnUpstreamBodyBreak(t *testing.T) {
+	st := &failoverSeqTransport{}
+	cfg := Config{Mappings: defaultMappings, Failover: []string{"google"}, CacheMaxTTL: 300, CacheEntries: 100}
+	s := testServer(cfg, st)
+	req := httptest.NewRequest(http.MethodPost, "https://doh.example.com/cloudflare/query-dns", bytes.NewReader(testDNSQuery()))
+	req.Header.Set("Content-Type", "application/dns-message")
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+
+	if w.Code != 200 || w.Body.String() != "dns-binary" {
+		t.Fatalf("断流后应转移到备用上游返回 200，实际 code=%d body=%q", w.Code, w.Body.String())
+	}
+	if len(st.urls) != 2 || !strings.HasPrefix(st.urls[0], "https://one.one.one.one/") || !strings.HasPrefix(st.urls[1], "https://dns.google/") {
+		t.Fatalf("应依次尝试 cloudflare→google，实际 %v", st.urls)
+	}
+	if _, fails := s.healthFor("cloudflare").snapshot(); fails != 1 {
+		t.Errorf("断流上游应记失败一次，实际 fails=%d", fails)
+	}
+}
+
+// 客户端的 Accept-Encoding 不透传：transport 只对自己加的 gzip 透明解压，
+// 透传会让压缩应答原样进缓存，未带该头的客户端命中后拿到压缩体无法解析
+func TestAcceptEncodingNotForwarded(t *testing.T) {
+	st := &stubTransport{}
+	s := testServer(Config{Mappings: defaultMappings}, st)
+	req := httptest.NewRequest(http.MethodPost, "https://doh.example.com/cloudflare/query-dns", strings.NewReader("\x33\x44dns"))
+	req.Header.Set("Content-Type", "application/dns-message")
+	req.Header.Set("Accept-Encoding", "gzip, br")
+	w := httptest.NewRecorder()
+	s.ServeHTTP(w, req)
+	if w.Code != 200 {
+		t.Fatalf("期望 200，实际 %d", w.Code)
+	}
+	if st.lastAcceptEncoding != "" {
+		t.Errorf("上游请求不应携带 Accept-Encoding，实际 %q", st.lastAcceptEncoding)
+	}
+}
+
+// FAILOVER_CHAIN 必须基于 DOMAIN_MAPPINGS 覆盖后的映射表解析：
+// 曾因在覆盖前校验，自定义上游名被误判「不在映射表」而丢弃，导致故障转移失效
+func TestFailoverChainAfterMappingsOverride(t *testing.T) {
+	t.Setenv("DOMAIN_MAPPINGS", `{"/primary":{"targetDomain":"a.example.com"},"/backup":{"targetDomain":"b.example.com"}}`)
+	t.Setenv("FAILOVER_CHAIN", "backup")
+	cfg := loadConfig()
+	if len(cfg.Failover) != 1 || cfg.Failover[0] != "backup" {
+		t.Fatalf("FAILOVER_CHAIN 应识别 DOMAIN_MAPPINGS 里的自定义上游，实际 %v", cfg.Failover)
+	}
+
+	// 自定义映射不含默认链上游时，默认链应整体为空（仅告警，不报错）
+	t.Setenv("DOMAIN_MAPPINGS", `{"/primary":{"targetDomain":"a.example.com"}}`)
+	t.Setenv("FAILOVER_CHAIN", "")
+	cfg = loadConfig()
+	if len(cfg.Failover) != 0 {
+		t.Fatalf("自定义映射不含默认链上游时链应为空，实际 %v", cfg.Failover)
 	}
 }

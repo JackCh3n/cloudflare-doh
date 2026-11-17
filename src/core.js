@@ -66,26 +66,27 @@ export const DEFAULT_PATH_MAPPINGS = {
 	// 在此继续添加映射
 };
 
-/** 未命中映射时返回的伪装 404 页面（刻意伪装成浏览器断网页） */
+/** 未命中映射时返回的伪装 404 页面（刻意伪装成浏览器断网页；随系统深浅色自适应） */
 export const HOMEPAGE_HTML = `<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
     <meta charset="UTF-8">
-    <meta http-equiv="X-UA-Compatible" content="IE=edge">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light dark">
     <title>404</title>
     <script>document.title = location.host || '404';</script>
     <style>
         body{
             font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
             margin: 0;
+            background-color: #fff;
         }
         .main{
             width: 600px;
             max-width: 92%;
-            height:417px;
             margin: 0 auto;
-            margin-top: 125px;
+            padding-top: clamp(48px, 14vh, 125px);
+            box-sizing: border-box;
         }
         img{
             margin-bottom: 20px;
@@ -94,8 +95,12 @@ export const HOMEPAGE_HTML = `<!DOCTYPE html>
             font-size: 14px;
             color: rgb(32, 33, 36);
         }
+        .error-code{
+            font-size: 12px;
+            color: rgb(95, 99, 104);
+        }
         span{
-            color:rgb(26, 115, 232);
+            color: rgb(26, 115, 232);
             cursor: pointer;
         }
         span:hover{
@@ -104,22 +109,60 @@ export const HOMEPAGE_HTML = `<!DOCTYPE html>
         button{
             float: right;
             margin-top: 60px;
-            background-color: #1970e5;
+            font: inherit;
+            font-size: 14px;
+            background-color: #1a73e8;
             color: #fff;
-            border-width: 0px;
-            padding:10px;
-            border-radius: 10%;
+            border: 0;
+            border-radius: 20px;
+            padding: 10px 24px;
             cursor: pointer;
+        }
+        button:hover{
+            background-color: #1765cc;
+        }
+        button:active{
+            background-color: #145bb3;
+        }
+        @media (prefers-color-scheme: dark){
+            body{
+                background-color: #202124;
+            }
+            img{
+                filter: invert(1);
+            }
+            p{
+                color: rgb(232, 234, 237);
+            }
+            .error-code{
+                color: rgb(154, 160, 166);
+            }
+            span{
+                color: rgb(138, 180, 248);
+            }
+            span:hover{
+                border-bottom-color: rgb(138, 180, 248);
+            }
+            button{
+                background-color: #8ab4f8;
+                color: #202124;
+            }
+            button:hover{
+                background-color: #a3c4fa;
+            }
+            button:active{
+                background-color: #93b8fb;
+            }
         }
     </style>
 </head>
 <body>
     <div class="main">
-        <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEgAAABIAQMAAABvIyEEAAAABlBMVEUAAABTU1OoaSf/AAAAAXRSTlMAQObYZgAAAENJREFUeF7tzbEJACEQRNGBLeAasBCza2lLEGx0CxFGG9hBMDDxRy/72O9FMnIFapGylsu1fgoBdkXfUHLrQgdfrlJN1BdYBjQQm3UAAAAASUVORK5CYII=" alt="">
+        <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEgAAABIAQMAAABvIyEEAAAABlBMVEUAAABTU1OoaSf/AAAAAXRSTlMAQObYZgAAAENJREFUeF7tzbEJACEQRNGBLeAasBCza2lLEGx0CxFGG9hBMDDxRy/72O9FMnIFapGylsu1fgoBdkXfUHLrQgdfrlJN1BdYBjQQm3UAAAAASUVORK5CYII=" alt="" width="68" height="18">
         <p style="font-size:24px;">无法访问此网站</p>
         <p>检查是否有拼写错误。</p>
         <p>如果拼写无误，请<span>尝试运行 Windows 网络诊断</span>。</p>
-        <p style="font-size:12px;">DNS_PROBE_FINISHED_NXDOMAIN</p>
+        <p class="error-code">DNS_PROBE_FINISHED_NXDOMAIN</p>
         <button onclick="location.reload()">重新加载</button>
     </div>
 
@@ -127,7 +170,7 @@ export const HOMEPAGE_HTML = `<!DOCTYPE html>
 </html>`;
 
 /** 需要剥离的请求头（由运行时或目标域名自行决定） */
-const DROPPED_REQUEST_HEADERS = ['host', 'content-length'];
+const DROPPED_REQUEST_HEADERS = ['host', 'content-length', 'accept-encoding'];
 
 /** hop-by-hop 头：逐跳语义，不应透传（对齐 Go 版 hopHeaders） */
 const HOP_BY_HOP_HEADERS = [

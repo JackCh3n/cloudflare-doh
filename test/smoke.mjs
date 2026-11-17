@@ -572,17 +572,19 @@ await check('请求体超过 64KB 返回 413 且不打上游', async () => {
 	assert.equal(stub.calls.length, 0);
 });
 
-await check('hop-by-hop 请求头不透传给上游', async () => {
+await check('hop-by-hop 请求头不透传给上游，accept-encoding 由运行时自管', async () => {
 	const stub = createFetchStub();
 	await proxyRequest(
 		new Request('https://x.dev/google/query-dns?name=a.com', {
-			headers: { accept: 'application/dns-json', connection: 'keep-alive', te: 'trailers', host: 'x.dev' },
+			headers: { accept: 'application/dns-json', connection: 'keep-alive', te: 'trailers', host: 'x.dev', 'accept-encoding': 'gzip, br' },
 		}),
 		{ env: {}, fetchImpl: stub }
 	);
 	assert.equal(stub.calls[0].init.headers.get('connection'), null);
 	assert.equal(stub.calls[0].init.headers.get('te'), null);
 	assert.equal(stub.calls[0].init.headers.get('host'), null);
+	// 透传 accept-encoding 会让压缩应答进缓存，未带该头的客户端命中后拿到压缩体（对齐 Go 版）
+	assert.equal(stub.calls[0].init.headers.get('accept-encoding'), null);
 });
 
 // ==================== 上游熔断与故障转移 ====================
@@ -741,6 +743,11 @@ await check('伪装 404 页三处副本逐字一致（core.js / index.html / mai
 	assert.match(html, /location\.reload\(\)/);
 	assert.match(html, /document\.title = location\.host/);
 	assert.doesNotMatch(html, /Windos |FINSHED/);
+	// UI 现代化守卫：深浅色自适应、按钮继承页面字体、响应式顶部留白
+	assert.match(html, /prefers-color-scheme/);
+	assert.match(html, /color-scheme/);
+	assert.match(html, /font:\s*inherit/);
+	assert.match(html, /clamp\(/);
 });
 
 await check('HOMEPAGE_HTML 导出与 index.html 一致（入口直用场景）', () => {
