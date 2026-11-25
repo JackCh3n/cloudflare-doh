@@ -2,12 +2,14 @@
 # .cnb.yml - CNB（cnb.cool）云原生构建配置
 # Docker 制品库：docker.cnb.cool/jackch3n/cloudflare-doh
 #
-# 发布模型：版本号驱动（与 GitHub Actions 一致），每次推送都出可部署的制品：
-#   - 分支 push → 读取 package.json 版本 X.Y.Z，推 :X.Y.Z、:X.Y、:latest、:<分支名>
-#                 （版本号按规则每次提交递增，所以每次修复都有对应版本的镜像）
-#   - tag  push → 以 tag 为准，推 :vX.Y.Z、:X.Y.Z、:X.Y、:latest
+# 发布模型：版本号驱动（与 GitHub Actions 一致），版本号只在发布时变更：
+#   - main  分支 push → 读取 package.json 版本 X.Y.Z，推 :X.Y.Z、:X.Y、:latest、:main
+#   - 其它  分支 push → 只推 :<分支名>。功能分支不得发布版本化镜像与 :latest，
+#                      否则一次推送就会用未发布的代码覆盖已发布的镜像
+#   - tag   push     → 以 tag 为准，推 :vX.Y.Z、:X.Y.Z、:X.Y、:latest
 # 说明：`$` 兜底所有未明确声明的分支；services: docker 已内置对
-#       docker.cnb.cool 的登录（CNB_TOKEN 自动注入），无需手动 docker login
+#       docker.cnb.cool 的登录（CNB_TOKEN 自动注入），无需手动 docker login。
+#       版本号通过 --build-arg VERSION 编进二进制（doh-proxy -version、/metrics 会报出来）
 # ============================================================
 
 "$":
@@ -26,12 +28,19 @@
             [ -n "$VER" ] || { echo "无法从 package.json 读取 version"; exit 1; }
             MINOR="${VER%.*}"
             BRANCH_TAG="$(echo "${CNB_BRANCH}" | tr '/' '-')"
-            docker build -t "${IMAGE}:${VER}" -t "${IMAGE}:${MINOR}" -t "${IMAGE}:latest" -t "${IMAGE}:${BRANCH_TAG}" .
-            docker push "${IMAGE}:${VER}"
-            docker push "${IMAGE}:${MINOR}"
-            docker push "${IMAGE}:latest"
+            docker build --build-arg VERSION="${VER}" -t "${IMAGE}:${BRANCH_TAG}" .
             docker push "${IMAGE}:${BRANCH_TAG}"
-            echo "pushed: ${IMAGE}:${VER} ${IMAGE}:${MINOR} ${IMAGE}:latest ${IMAGE}:${BRANCH_TAG}"
+            if [ "${CNB_BRANCH}" = "main" ]; then
+              docker tag "${IMAGE}:${BRANCH_TAG}" "${IMAGE}:${VER}"
+              docker tag "${IMAGE}:${BRANCH_TAG}" "${IMAGE}:${MINOR}"
+              docker tag "${IMAGE}:${BRANCH_TAG}" "${IMAGE}:latest"
+              docker push "${IMAGE}:${VER}"
+              docker push "${IMAGE}:${MINOR}"
+              docker push "${IMAGE}:latest"
+              echo "pushed: ${IMAGE}:${VER} ${IMAGE}:${MINOR} ${IMAGE}:latest ${IMAGE}:${BRANCH_TAG}"
+            else
+              echo "pushed: ${IMAGE}:${BRANCH_TAG}（非 main 分支不发布版本化镜像与 latest）"
+            fi
 
   tag_push:
     - name: docker-release-tag
@@ -46,7 +55,7 @@
             IMAGE="${CNB_DOCKER_REGISTRY}/${CNB_REPO_SLUG_LOWERCASE}"
             VER="${CNB_BRANCH#v}"
             MINOR="${VER%.*}"
-            docker build -t "${IMAGE}:${CNB_BRANCH}" -t "${IMAGE}:${VER}" -t "${IMAGE}:${MINOR}" -t "${IMAGE}:latest" .
+            docker build --build-arg VERSION="${VER}" -t "${IMAGE}:${CNB_BRANCH}" -t "${IMAGE}:${VER}" -t "${IMAGE}:${MINOR}" -t "${IMAGE}:latest" .
             docker push "${IMAGE}:${CNB_BRANCH}"
             docker push "${IMAGE}:${VER}"
             docker push "${IMAGE}:${MINOR}"

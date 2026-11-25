@@ -1,6 +1,6 @@
 name: Release
 
-# 发布模型：版本号驱动（版本号来自 package.json，按规则每次提交递增）
+# 发布模型：版本号驱动（版本号来自 package.json，只在发布时变更）
 #   push 到 main → 读取 package.json 版本：
 #     - 该版本的 tag 尚不存在 → 自动打 tag vX.Y.Z → 发 Releases（二进制 + SHA256SUMS）
 #                               + 推 GHCR 镜像 :X.Y.Z / :X.Y / :latest / :edge
@@ -76,7 +76,7 @@ jobs:
           go test ./...
 
   binaries:
-    needs: test
+    needs: [version, test]
     runs-on: ubuntu-latest
     strategy:
       matrix:
@@ -98,9 +98,11 @@ jobs:
         env:
           GOOS: ${{ matrix.goos }}
           GOARCH: ${{ matrix.goarch }}
+          # 把版本号编进二进制：doh-proxy -version、启动日志与 /metrics 都会报出来
+          VERSION: ${{ needs.version.outputs.version }}
         run: |
           mkdir -p ../dist/release
-          go build -trimpath -ldflags="-s -w" \
+          go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" \
             -o "../dist/release/doh-proxy-${GOOS}-${GOARCH}${{ matrix.ext }}" .
       - uses: actions/upload-artifact@v4
         with:

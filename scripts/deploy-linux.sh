@@ -142,6 +142,8 @@ chmod 0755 "$tmp/$BIN_NAME"
 log "安装到 ${BIN_LOCAL}"
 mkdir -p "$INSTALL_DIR" "$INSTALL_DIR/tls"
 install -m 0755 "$tmp/$BIN_NAME" "$BIN_LOCAL"
+# CI 发布的产物带版本号；本地直接编译的、或旧版二进制不支持 -version，都归为 unknown
+log "二进制版本：$("$BIN_LOCAL" -version 2>/dev/null || echo unknown)"
 
 # ---------- 3. TLS ----------
 TLS_FLAGS=""

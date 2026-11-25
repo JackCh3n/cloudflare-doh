@@ -1,9 +1,11 @@
 # syntax=docker/dockerfile:1
 # Go 版 DoH 代理容器镜像：多阶段构建，仅标准库，最终镜像基于 alpine（含 CA 证书以访问 https 上游）
 FROM golang:1.22-alpine AS build
+# 编进二进制的版本号（doh-proxy -version、/metrics 会报出来）；CI 构建时通过 --build-arg VERSION=X.Y.Z 传入
+ARG VERSION=dev
 WORKDIR /src/server
 COPY server/ ./
-RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/doh-proxy .
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w -X main.version=${VERSION}" -o /out/doh-proxy .
 
 FROM alpine:3.20
 RUN apk add --no-cache ca-certificates
