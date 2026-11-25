@@ -21,6 +21,8 @@ import {
 	dnsMinTTL,
 	decrementTTLs,
 	rewriteID,
+	cacheableTTL,
+	createDnsCache,
 	createEdgeState,
 	HOMEPAGE_HTML,
 	DEFAULT_PATH_MAPPINGS,
@@ -73,6 +75,33 @@ function createFactoryFetch(makeResponse) {
 	const stub = async (url, init) => {
 		calls.push({ url, init });
 		return makeResponse();
+	};
+	stub.calls = calls;
+	return stub;
+}
+
+/**
+ * 像「守规矩的上游」一样的 fetch 桩：每次调用都从请求里取出查询（POST 体或 GET 的 ?dns=），
+ * 交给 make(query) 构造一份全新的应答。缺省回显事务 ID、question，并带一条 TTL=300 的 A 记录
+ * @param {(query: {id:number, keyBytes:Uint8Array, question:Uint8Array}) => Uint8Array} [make]
+ * @param {(query) => Response} [wrap]  可选，自定义 Response（状态码 / 响应头）
+ */
+function createEchoFetch(make = (query) => makeDnsResponse(query.id, 300), wrap = null) {
+	const calls = [];
+	const stub = async (url, init) => {
+		calls.push({ url, init });
+		let body = null;
+		if (init && init.body && init.body.byteLength > 0) {
+			body = new Uint8Array(init.body);
+		} else {
+			const param = new URL(url).searchParams.get('dns') || '';
+			const bin = atob(param.replace(/-/g, '+').replace(/_/g, '/'));
+			body = new Uint8Array(bin.length);
+			for (let i = 0; i < bin.length; i++) body[i] = bin.charCodeAt(i);
+		}
+		const query = parseDohMessageKey(body);
+		const resp = make(query);
+		return wrap ? wrap(query, resp) : new Response(resp, { status: 200, headers: { 'content-type': 'application/dns-message' } });
 	};
 	stub.calls = calls;
 	return stub;
@@ -448,7 +477,7 @@ await check('parseDohMessageKey：键不含事务 ID，不同 ID 同键', () => 
 	const b = parseDohMessageKey(makeDnsQuery(0x2222));
 	assert.equal(a.id, 0x1111);
 	assert.equal(Buffer.from(a.keyBytes).equals(Buffer.from(b.keyBytes)), true);
-	assert.equal(a.keyBytes.length, 2 + 17); // flags 2B + question 17B(qname13+qtype2+qclass2)
+	assert.equal(a.keyBytes.length, 3 + 17); // flags 2B + question 17B(qname13+qtype2+qclass2) + EDNS 信息 1B
 });
 
 await check('parseDohMessageKey：短报文 / QDCOUNT≠1 / question 带指针 均返回 null', () => {
@@ -491,13 +520,60 @@ await check('rewriteID：改写头两字节为客户端 ID', () => {
 	assert.equal((out[0] << 8) | out[1], 0x2222);
 });
 
+await check('末尾记录的数据被截断的应答视为畸形（rrNext 越界检查，对齐 Go）', () => {
+	const resp = makeDnsResponse(1, 300).slice(0, -4); // A 记录声明 rdlen=4，但数据缺失
+	assert.equal(dnsMinTTL(resp), -1);
+	assert.equal(dnsMinTTL(decrementTTLs(resp, 100)), -1, '递减失败时原样返回，不改坏报文');
+});
+
+/** 构造一条 EDNS0 OPT 记录（11 字节）：root 名 + TYPE(41) + CLASS(1232) + TTL(4) + RDLENGTH(0)；doBit 为 true 时置 DO 位 */
+function makeOPT(doBit) {
+	const opt = new Uint8Array(11);
+	const dv = new DataView(opt.buffer);
+	dv.setUint16(1, 41);
+	dv.setUint16(3, 1232);
+	if (doBit) dv.setUint8(5, 0x80); // OPT 的 TTL 字段最高位即 DO
+	return opt;
+}
+
+/** 给查询追加一条 EDNS0 OPT 并更新 ARCOUNT */
+function withOPT(query, doBit) {
+	const opt = makeOPT(doBit);
+	const out = new Uint8Array(query.length + opt.length);
+	out.set(query);
+	out.set(opt, query.length);
+	out[11] = 1; // ARCOUNT
+	return out;
+}
+
+/** OPT 的 11 个字节里 TTL 字段第 0 字节（DO 位所在）相对 OPT 末尾的偏移 */
+const OPT_DO_FROM_END = 6;
+
+await check('parseDohMessageKey：EDNS 信息进键（带不带 OPT、DO 位各不相同）', () => {
+	const plain = parseDohMessageKey(makeDnsQuery(1));
+	const edns = parseDohMessageKey(withOPT(makeDnsQuery(2), false));
+	const dnssec = parseDohMessageKey(withOPT(makeDnsQuery(3), true));
+	assert.equal(plain.keyBytes[plain.keyBytes.length - 1], 0);
+	assert.equal(edns.keyBytes[edns.keyBytes.length - 1], 1);
+	assert.equal(dnssec.keyBytes[dnssec.keyBytes.length - 1], 3);
+	// OPT 的 TTL 字段里除 DO 以外的位（扩展 RCODE 等）不参与键
+	const ext = withOPT(makeDnsQuery(4), false);
+	ext[makeDnsQuery(4).length + 6] = 0x01;
+	assert.equal(Buffer.from(parseDohMessageKey(ext).keyBytes).equals(Buffer.from(edns.keyBytes)), true);
+	// question 之后还有记录但解析不了：不可缓存（第二条记录的名字以非法长度开头）
+	const first = withOPT(makeDnsQuery(5), false);
+	const broken = new Uint8Array(first.length + 12);
+	broken.set(first);
+	broken[first.length] = 0x40;
+	broken[11] = 2; // ARCOUNT
+	assert.equal(parseDohMessageKey(broken), null);
+});
+
 // ==================== 进程内应答缓存 ====================
 
 await check('POST 查询 MISS→HIT：换事务 ID 也能命中，且只打一次上游', async () => {
 	const state = createEdgeState({});
-	const stub = createFetchStub(
-		new Response(makeDnsResponse(0xabcd, 300), { status: 200, headers: { 'content-type': 'application/dns-message' } })
-	);
+	const stub = createEchoFetch();
 	const r1 = await proxyRequest(dnsPostRequest('/cloudflare/query-dns', makeDnsQuery(0x1111)), { env: {}, fetchImpl: stub, state });
 	assert.equal(r1.status, 200);
 	assert.equal(r1.headers.get('x-cache'), 'MISS');
@@ -514,13 +590,123 @@ await check('POST 查询 MISS→HIT：换事务 ID 也能命中，且只打一�
 await check('GET ?dns= 查询同样可命中缓存', async () => {
 	const state = createEdgeState({});
 	const param = Buffer.from(makeDnsQuery(7)).toString('base64url');
-	const stub = createFetchStub(new Response(makeDnsResponse(7, 300), { status: 200 }));
+	const stub = createEchoFetch();
 	const url = `https://x.dev/google/query-dns?dns=${param}`;
 	const r1 = await proxyRequest(new Request(url, { headers: { accept: 'application/dns-message' } }), { env: {}, fetchImpl: stub, state });
 	assert.equal(r1.headers.get('x-cache'), 'MISS');
 	const r2 = await proxyRequest(new Request(url, { headers: { accept: 'application/dns-message' } }), { env: {}, fetchImpl: stub, state });
 	assert.equal(stub.calls.length, 1);
 	assert.equal(r2.headers.get('x-cache'), 'HIT');
+});
+
+await check('cacheableTTL：TC=1 / ID 未回显 / question 不符 / QR=0 / 非 DNS 媒体类型 一律不可缓存', () => {
+	const query = parseDohMessageKey(makeDnsQuery(0x4242));
+	const good = makeDnsResponse(0x4242, 300);
+	assert.equal(cacheableTTL(good, query, 'application/dns-message'), 300);
+	assert.equal(cacheableTTL(good, query, 'Application/DNS-Message; charset=binary'), 300, '媒体类型比较不区分大小写，允许带参数');
+
+	const mutated = (mutate) => {
+		const body = makeDnsResponse(0x4242, 300);
+		mutate(body);
+		return body;
+	};
+	assert.equal(cacheableTTL(mutated((b) => (b[2] |= 0x02)), query, 'application/dns-message'), -1, 'TC=1 截断的应答');
+	assert.equal(cacheableTTL(mutated((b) => (b[1] ^= 0xff)), query, 'application/dns-message'), -1, '事务 ID 没有回显');
+	assert.equal(cacheableTTL(mutated((b) => (b[13] = 0x77)), query, 'application/dns-message'), -1, 'question 与查询不符');
+	assert.equal(cacheableTTL(mutated((b) => (b[2] &= 0x7f)), query, 'application/dns-message'), -1, 'QR=0 是查询不是应答');
+	assert.equal(cacheableTTL(good.slice(0, -4), query, 'application/dns-message'), -1, '末尾记录的数据被截断');
+	assert.equal(cacheableTTL(good, query, 'text/html'), -1, '上游用 200 返回的门户认证页');
+	assert.equal(cacheableTTL(good, query, ''), -1, '没有媒体类型');
+});
+
+await check('截断（TC=1）的应答不进缓存：带更大缓冲区的客户端不该一直拿到残缺应答', async () => {
+	const state = createEdgeState({});
+	const stub = createEchoFetch((query) => {
+		const resp = makeDnsResponse(query.id, 300);
+		resp[2] |= 0x02; // TC
+		return resp;
+	});
+	await proxyRequest(dnsPostRequest('/cloudflare/query-dns', makeDnsQuery(0x7701)), { env: {}, fetchImpl: stub, state });
+	const r2 = await proxyRequest(dnsPostRequest('/cloudflare/query-dns', makeDnsQuery(0x7701)), { env: {}, fetchImpl: stub, state });
+	assert.equal(stub.calls.length, 2);
+	assert.equal(r2.headers.get('x-cache'), 'MISS');
+});
+
+await check('ID / question 对不上、或不是 DNS 媒体类型的 200 应答不进缓存', async () => {
+	const DNS = { status: 200, headers: { 'content-type': 'application/dns-message' } };
+	const cases = [
+		['事务 ID 没有回显', (q) => new Response(makeDnsResponse(q.id ^ 0xffff, 300), DNS)],
+		[
+			'question 与查询不符',
+			(q) => {
+				const body = makeDnsResponse(q.id, 300);
+				body[13] = 0x77;
+				body[14] = 0x77;
+				return new Response(body, DNS);
+			},
+		],
+		['非 DNS 内容', () => new Response('<html>登录后上网</html>', { status: 200, headers: { 'content-type': 'text/html' } })],
+		['没有媒体类型', (q) => new Response(makeDnsResponse(q.id, 300), { status: 200 })],
+	];
+	for (const [name, respond] of cases) {
+		const state = createEdgeState({});
+		const stub = createEchoFetch(undefined, respond);
+		const r1 = await proxyRequest(dnsPostRequest('/cloudflare/query-dns', makeDnsQuery(0x8801)), { env: {}, fetchImpl: stub, state });
+		assert.equal(r1.status, 200, `${name}：应答本身仍应原样透传`);
+		await proxyRequest(dnsPostRequest('/cloudflare/query-dns', makeDnsQuery(0x8801)), { env: {}, fetchImpl: stub, state });
+		assert.equal(stub.calls.length, 2, `${name}：不应缓存`);
+	}
+});
+
+await check('缓存键带 EDNS 信息：带不带 OPT、带不带 DO 各拿各的应答', async () => {
+	// 模拟上游：查询带 OPT 才回 OPT，并原样回显 DO 位
+	const stub = createEchoFetch((query) => {
+		const resp = makeDnsResponse(query.id, 300);
+		if (!(query.keyBytes[query.keyBytes.length - 1] & 1)) return resp;
+		const opt = makeOPT(Boolean(query.keyBytes[query.keyBytes.length - 1] & 2));
+		const out = new Uint8Array(resp.length + opt.length);
+		out.set(resp);
+		out.set(opt, resp.length);
+		out[11] = 1; // 应答的 ARCOUNT：带一条 OPT
+		return out;
+	});
+	const state = createEdgeState({});
+	const base = makeDnsResponse(1, 300).length;
+	const plain = dnsPostRequest('/cloudflare/query-dns', makeDnsQuery(0x0001));
+	const edns = dnsPostRequest('/cloudflare/query-dns', withOPT(makeDnsQuery(0x0002), false));
+	const dnssec = dnsPostRequest('/cloudflare/query-dns', withOPT(makeDnsQuery(0x0003), true));
+	assert.equal((await (await proxyRequest(plain, { env: {}, fetchImpl: stub, state })).arrayBuffer()).byteLength, base);
+	const ednsBody = new Uint8Array(await (await proxyRequest(edns, { env: {}, fetchImpl: stub, state })).arrayBuffer());
+	const dnssecBody = new Uint8Array(await (await proxyRequest(dnssec, { env: {}, fetchImpl: stub, state })).arrayBuffer());
+	assert.equal(stub.calls.length, 3, '三种 EDNS 形态各打一次上游');
+	assert.equal(ednsBody.length, base + 11);
+	assert.equal(ednsBody[ednsBody.length - OPT_DO_FROM_END] & 0x80, 0, '没要 DO 的应答里 DO 位为 0');
+	assert.equal(dnssecBody.length, base + 11);
+	assert.equal(dnssecBody[dnssecBody.length - OPT_DO_FROM_END] & 0x80, 0x80, '要了 DO 的应答里 DO 位为 1');
+
+	// 再问一轮：全部命中，且各自拿到的还是自己那一份
+	const again = new Uint8Array(await (await proxyRequest(dnsPostRequest('/cloudflare/query-dns', withOPT(makeDnsQuery(0x0004), true)), { env: {}, fetchImpl: stub, state })).arrayBuffer());
+	await proxyRequest(plain, { env: {}, fetchImpl: stub, state });
+	assert.equal(stub.calls.length, 3, '第二轮应全部命中缓存');
+	assert.equal((again[0] << 8) | again[1], 0x0004);
+	assert.equal(again[again.length - OPT_DO_FROM_END] & 0x80, 0x80, '带 DO 的客户端命中后拿到的仍是带 DO 的应答');
+});
+
+await check('缓存受总字节上限约束：超预算从最久未用的一端淘汰，单条超预算不入缓存', () => {
+	// 每条 = 1000 字节应答体 + 键（"cloudflare|" + 20 字节键的十六进制 = 51 字符）
+	const cache = createDnsCache(1000, 300, 2100);
+	const body = () => new Uint8Array(1000);
+	for (const key of ['a', 'b', 'c', 'd']) cache.put(key, body(), 'application/dns-message', 300);
+	assert.equal(cache.size, 2);
+	assert.equal(cache.byteSize, 2002);
+	assert.equal(cache.get('a'), null, '最久未用的 a 最先被淘汰');
+	assert.notEqual(cache.get('d'), null, '最新的 d 留着');
+	// 单条就超过总预算：不入缓存，也不为它淘汰别的条目
+	cache.put('huge', new Uint8Array(5000), 'application/dns-message', 300);
+	assert.equal(cache.size, 2);
+	assert.equal(cache.get('huge'), null);
+	// 预算为 0 等于关闭
+	assert.equal(createDnsCache(100, 300, 0), null);
 });
 
 await check('JSON DoH 无 wire 报文：不缓存、无 X-Cache 头', async () => {
@@ -637,7 +823,7 @@ await check('熔断达阈值后跳过故障上游；全 OPEN 时仍打首选兜�
 	assert.equal(stub.calls.length, 3);
 });
 
-await check('4xx 不算熔断失败：原样透传且不触发转移', async () => {
+await check('400 等其它 4xx 不算熔断失败：原样透传且不触发转移', async () => {
 	const state = createEdgeState({ FAILOVER_CHAIN: 'google' });
 	const stub = createFetchStub(new Response('bad request', { status: 400 }));
 	const r = await proxyRequest(dnsPostRequest('/cloudflare/query-dns', makeDnsQuery(1)), { env: {}, fetchImpl: stub, state });
@@ -645,6 +831,24 @@ await check('4xx 不算熔断失败：原样透传且不触发转移', async () 
 	assert.equal(await r.text(), 'bad request');
 	assert.equal(stub.calls.length, 1, '4xx 不转移');
 	assert.deepEqual(state.health.snapshot().cloudflare, { healthy: true, consecutive_failures: 0 });
+});
+
+await check('上游 429（限流）算失败并转移：换一家才能把这次查询做成功', async () => {
+	// 首选回 429 → 转移到 google 成功，并给首选记一次失败
+	const state = createEdgeState({ FAILOVER_CHAIN: 'google', CB_THRESHOLD: '2' });
+	const stub = createSequenceFetch([{ response: new Response('slow down', { status: 429 }) }, { response: new Response('ok', { status: 200 }) }]);
+	const r = await proxyRequest(dnsPostRequest('/cloudflare/query-dns', makeDnsQuery(1)), { env: {}, fetchImpl: stub, state });
+	assert.equal(r.status, 200);
+	assert.equal(stub.calls[0].url.startsWith('https://one.one.one.one/'), true);
+	assert.equal(stub.calls[1].url.startsWith('https://dns.google/dns-query'), true);
+	assert.deepEqual(state.health.snapshot().cloudflare, { healthy: true, consecutive_failures: 1 });
+
+	// 全部 429 → 503 + Retry-After
+	const all = createEdgeState({ FAILOVER_CHAIN: 'google' });
+	const stubAll = createSequenceFetch([{ response: new Response('x', { status: 429 }) }, { response: new Response('x', { status: 429 }) }]);
+	const r2 = await proxyRequest(dnsPostRequest('/cloudflare/query-dns', makeDnsQuery(1)), { env: {}, fetchImpl: stubAll, state: all });
+	assert.equal(r2.status, 503);
+	assert.equal(r2.headers.get('retry-after'), '2');
 });
 
 // ==================== 健康检查 / metrics ====================
@@ -660,9 +864,9 @@ await check('HEALTH_PATH 配置后返回 200 ok；未配置走伪装 404', async
 	assert.equal(off.status, 404);
 });
 
-await check('METRICS_PATH 输出 JSON：providers / cache 计数 / 累计指标', async () => {
+await check('METRICS_PATH 输出 JSON：providers / cache 计数与字节 / 累计指标', async () => {
 	const state = createEdgeState({ METRICS_PATH: '/metrics' });
-	const stub = createFetchStub(new Response(makeDnsResponse(1, 300), { status: 200 }));
+	const stub = createEchoFetch();
 	await proxyRequest(dnsPostRequest('/cloudflare/query-dns', makeDnsQuery(1)), { env: {}, fetchImpl: stub, state });
 	const r = await proxyRequest(new Request('https://x.dev/metrics'), { env: { METRICS_PATH: '/metrics' }, fetchImpl: () => { throw new Error('不应发起请求'); }, state });
 	assert.equal(r.status, 200);
@@ -678,6 +882,37 @@ await check('METRICS_PATH 输出 JSON：providers / cache 计数 / 累计指标'
 	assert.equal(m.cache_misses, 1);
 	assert.equal(m.cache_entries, 1);
 	assert.equal(m.cache_max_ttl, 300);
+	assert.equal(m.cache_bytes > 0, true, '应报出缓存占用字节数');
+	assert.equal(m.cache_max_bytes, 64 * 1024 * 1024);
+});
+
+await check('熔断关闭（CB_THRESHOLD=0）时 providers 一律视为健康', () => {
+	const state = createEdgeState({ CB_THRESHOLD: '0' });
+	state.health.record('cloudflare', false);
+	assert.equal(state.health.allow('cloudflare'), true);
+	assert.deepEqual(state.health.snapshot().cloudflare, { healthy: true, consecutive_failures: 1 });
+});
+
+await check('裸路径与故障转移的目标路径跟随 pathMapping（对齐 Go dohEndpointPath）', async () => {
+	// 端点不在 /dns-query 的上游：dns.nextdns.io/<profile>
+	const env = {
+		DEFAULT_UPSTREAM: 'nd',
+		FAILOVER_CHAIN: 'nd',
+		DOMAIN_MAPPINGS: {
+			'/nd': { targetDomain: 'dns.nextdns.io', pathMapping: { '/query-dns': '/abc123' } },
+			'/cloudflare': { targetDomain: 'one.one.one.one', pathMapping: { '/query-dns': '/dns-query' } },
+		},
+	};
+	assert.equal(resolveTarget(new URL('https://x.dev/dns-query?dns=abc'), env).targetUrl, 'https://dns.nextdns.io/abc123?dns=abc');
+	assert.equal(resolveTarget(new URL('https://x.dev/nd/query-dns'), env).targetUrl, 'https://dns.nextdns.io/abc123', '显式前缀路径仍按 pathMapping 重写');
+	// 故障转移：首选 cloudflare 网络错误 → 打到 nd 的端点路径
+	const state = createEdgeState(env);
+	const stub = createSequenceFetch([{ error: new Error('connection refused') }, { response: new Response('ok', { status: 200 }) }]);
+	const r = await proxyRequest(dnsPostRequest('/cloudflare/query-dns', makeDnsQuery(1)), { env, fetchImpl: stub, state });
+	assert.equal(r.status, 200);
+	assert.equal(stub.calls[1].url, 'https://dns.nextdns.io/abc123');
+	// 默认映射的端点仍是 /dns-query
+	assert.equal(resolveTarget(new URL('https://x.dev/dns-query'), {}).targetUrl, 'https://one.one.one.one/dns-query');
 });
 
 await check('createEdgeState 默认值：缓存开启、链默认三家', () => {

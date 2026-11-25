@@ -8,11 +8,15 @@
  * 不得引入任何 Node.js 内置模块或第三方依赖。
  *
  * 缓存键/报文改写/熔断语义与 Go 版（server/main.go）逐条对齐：
- *   - 缓存键 = 上游名 + DNS 头 flags + question 段（QNAME/QTYPE/QCLASS），事务 ID 不参与
+ *   - 缓存键 = 上游名 + DNS 头 flags + question 段（QNAME/QTYPE/QCLASS）+ EDNS 信息
+ *     （是否带 OPT、是否置 DO 位），事务 ID 不参与
  *   - 命中时先按存活秒数递减记录 TTL（跳过 OPT/TKEY/TSIG），再改写应答 ID 为客户端 ID
- *   - 只缓存 rcode 0/3、最小记录 TTL>0（rcode=3 无 SOA 自然不缓存）的 200 应答
+ *   - 只缓存「确实是这条查询的完整 DNS 应答」：媒体类型为 application/dns-message、
+ *     QR=1、事务 ID 与 question 原样回显、未截断（TC=0）、rcode 0/3 且最小记录 TTL>0
+ *   - 缓存受条目数与总字节（64 MiB）双重上限约束
  *   - 熔断：连续失败 CB_THRESHOLD 次 OPEN，冷却 CB_COOLDOWN_SEC 后放行；
- *     全部 OPEN 时仍打首选上游兜底；4xx 不算失败，原样透传
+ *     全部 OPEN 时仍打首选上游兜底；上游 5xx 与 429（限流）算失败并转移，其余 4xx 原样透传
+ *   - 裸路径与故障转移的目标路径跟随 pathMapping（端点不在 /dns-query 的上游也能用）
  *
  * 平台差异（与 Go 版的已知不同，勿混淆）：
  *   - 缓存/熔断/计数状态都是 **isolate 级**（每个边缘节点、每次部署/闲置回收后重置），
@@ -144,6 +148,10 @@ const HOP_BY_HOP_HEADERS = [
 /** 请求体/缓存应答的最大字节数（对齐 Go 版 maxBodyBytes） */
 const MAX_BODY_BYTES = 64 * 1024;
 
+/** 应答缓存的总字节预算（对齐 Go 版 maxCacheBytes）：
+ *  只限条目数不够——单条应答最大 64KB，默认 10000 条最坏能撑到约 640MB */
+const MAX_CACHE_BYTES = 64 * 1024 * 1024;
+
 /** 单次上游请求超时（对齐 Go 版 client 15s） */
 const UPSTREAM_TIMEOUT_MS = 15000;
 
@@ -223,6 +231,22 @@ export function getPathMappings(env) {
 const BARE_DOH_PATHS = ['/dns-query', '/query-dns'];
 
 /**
+ * 上游的 DoH 端点路径（对齐 Go dohEndpointPath）。裸路径与故障转移都打这里。
+ * pathMapping 把 /dns-query 或 /query-dns 映射到别处，说明端点不在标准位置
+ * （例如 dns.nextdns.io/<profile>），必须跟着映射走，否则会打到上游不存在的 /dns-query
+ * @param {Object} mapping 一条映射
+ * @returns {string}
+ */
+export function dohEndpointPath(mapping) {
+	const pathMapping = (mapping && mapping.pathMapping) || {};
+	for (const source of BARE_DOH_PATHS) {
+		const dest = pathMapping[source];
+		if (dest) return `/${String(dest).replace(/^\/+/, '')}`;
+	}
+	return '/dns-query';
+}
+
+/**
  * 构造「无路径前缀」的默认 DoH 目标
  * @param {URL} url
  * @param {Object} [env]
@@ -236,7 +260,7 @@ export function bareDohTarget(url, env) {
 	return {
 		prefix: '/',
 		targetDomain: mapping.targetDomain,
-		targetUrl: `https://${mapping.targetDomain}/dns-query${url.search}`,
+		targetUrl: `https://${mapping.targetDomain}${dohEndpointPath(mapping)}${url.search}`,
 	};
 }
 
@@ -360,10 +384,14 @@ function bytesToHex(b) {
 
 /**
  * 解析 DoH 查询报文，提取缓存键（对齐 Go parseDNSQuery）
- * 键 = DNS 头 flags(2B) + question 段（QNAME+QTYPE+QCLASS）；
+ * 键 = DNS 头 flags(2B) + question 段（QNAME+QTYPE+QCLASS）+ EDNS 信息(1B)；
  * 事务 ID 只返回不参与键（不同客户端 ID 不同但应答相同）。
+ *
+ * EDNS 信息必须进键：带 DO 位的客户端（自己做 DNSSEC 验证）要的应答里有 RRSIG 与 OPT，
+ * 不带的客户端拿到的应答里没有。两者共用一个键的话，先到的那份应答会被错发给另一种客户端。
+ * question 之后还有记录但解析不了（畸形报文）时视为不可缓存。
  * @param {Uint8Array} body
- * @returns {{id: number, keyBytes: Uint8Array}|null} 解析失败返回 null
+ * @returns {{id: number, keyBytes: Uint8Array, question: Uint8Array}|null} 解析失败返回 null
  */
 export function parseDohMessageKey(body) {
 	if (!body || body.length < 17) return null; // 12B 头 + 最短 question(根标签1B + QTYPE/QCLASS 4B)
@@ -379,11 +407,29 @@ export function parseDohMessageKey(body) {
 	}
 	if (i + 4 > body.length) return null; // QTYPE+QCLASS 不完整
 	const id = (body[0] << 8) | body[1];
-	const keyBytes = new Uint8Array(2 + (i + 4 - 12));
+	const question = body.subarray(12, i + 4);
+
+	// 跳过 answer / authority 段，在 additional 段里找 OPT
+	i += 4;
+	const an = (body[6] << 8) | body[7];
+	const ns = (body[8] << 8) | body[9];
+	const ar = (body[10] << 8) | body[11];
+	let edns = 0;
+	for (let c = 0, total = an + ns + ar; c < total; c++) {
+		const rr = rrNext(body, i);
+		if (!rr) return null;
+		if (c >= an + ns && rr.type === 41) {
+			// OPT 的 TTL 字段最高位就是 DO
+			edns = 1 | ((body[rr.ttlOff] & 0x80) !== 0 ? 2 : 0);
+		}
+		i = rr.next;
+	}
+	const keyBytes = new Uint8Array(3 + question.length);
 	keyBytes[0] = body[2];
 	keyBytes[1] = body[3];
-	keyBytes.set(body.subarray(12, i + 4), 2);
-	return { id, keyBytes };
+	keyBytes.set(question, 2);
+	keyBytes[2 + question.length] = edns;
+	return { id, keyBytes, question };
 }
 
 /**
@@ -501,6 +547,36 @@ export function rewriteID(body, id) {
 	return out;
 }
 
+/**
+ * 判断上游应答能否进缓存，返回它应缓存的秒数（对齐 Go storeCache 的判定）。
+ * 只缓存「确实是这条查询的完整 DNS 应答」：
+ *   - 媒体类型是 application/dns-message：上游用 200 返回的非 DNS 内容（例如门户认证页）不入缓存
+ *   - QR=1（是应答不是查询）
+ *   - 未截断（TC=0）：截断的应答只是完整应答的一部分，缓存之后带更大 EDNS 缓冲区的客户端
+ *     会一直拿到它，而它自己重新问一次又命中同一份，等于这次查询在 TTL 内永远解析不完
+ *   - question 与查询逐字节相同、事务 ID 原样回显：否则是别的查询的应答，不能挂到这个键下
+ *   - rcode 0/3 且最小记录 TTL>0（rcode=3 且无 SOA 的应答没有 TTL，自然不缓存）
+ * @param {Uint8Array} body 上游应答体
+ * @param {{id: number, question: Uint8Array}} query 对应的查询（parseDohMessageKey 的结果）
+ * @param {string} contentType 上游的 Content-Type
+ * @returns {number} 可缓存的 TTL（未封顶），不可缓存返回 -1
+ */
+export function cacheableTTL(body, query, contentType) {
+	if (!body || !query || body.length < 12 + query.question.length) return -1;
+	const mediaType = String(contentType || '').split(';')[0].trim().toLowerCase();
+	if (mediaType !== 'application/dns-message') return -1;
+	if ((body[2] & 0x80) === 0) return -1; // QR=0
+	if ((body[2] & 0x02) !== 0) return -1; // TC=1
+	if (((body[4] << 8) | body[5]) !== 1) return -1; // QDCOUNT
+	for (let i = 0; i < query.question.length; i++) {
+		if (body[12 + i] !== query.question[i]) return -1;
+	}
+	if (((body[0] << 8) | body[1]) !== query.id) return -1;
+	const rcode = body[3] & 0x0f;
+	if (rcode !== 0 && rcode !== 3) return -1;
+	return dnsMinTTL(body);
+}
+
 /** base64url / base64 解码 ?dns= 参数（无填充优先，带填充兜底） */
 function decodeDnsParam(raw) {
 	if (!raw) return null;
@@ -545,15 +621,19 @@ function parseDohQuery(request, url, bodyBuf) {
 // ============================================================
 
 /**
- * 进程内 LRU 应答缓存（对齐 Go dnsCache：惰性过期 + 按条数淘汰）
+ * 进程内 LRU 应答缓存（对齐 Go dnsCache：惰性过期 + 按条数与总字节上限淘汰）
  * @param {number} maxEntries 条目上限，<=0 返回 null（关闭）
  * @param {number} maxTtl 单条最长保留秒数，<=0 返回 null（关闭）
+ * @param {number} [maxBytes] 总字节上限，默认 64 MiB
  */
-function createDnsCache(maxEntries, maxTtl) {
-	if (!maxEntries || maxEntries <= 0 || !maxTtl || maxTtl <= 0) return null;
+export function createDnsCache(maxEntries, maxTtl, maxBytes = MAX_CACHE_BYTES) {
+	if (!maxEntries || maxEntries <= 0 || !maxTtl || maxTtl <= 0 || !maxBytes || maxBytes <= 0) return null;
 	const map = new Map(); // key -> {body, contentType, fetchedAt, ttl}
 	let hits = 0;
 	let misses = 0;
+	let bytes = 0;
+	// 一条缓存占用的内存 = 键 + 应答体（结构体本身的几十字节忽略不计）
+	const sizeOf = (key, entry) => key.length + entry.body.byteLength;
 	return {
 		get(key) {
 			const e = map.get(key);
@@ -564,6 +644,7 @@ function createDnsCache(maxEntries, maxTtl) {
 			const elapsedSec = Math.floor((Date.now() - e.fetchedAt) / 1000);
 			if (elapsedSec >= e.ttl) {
 				map.delete(key);
+				bytes -= sizeOf(key, e);
 				misses += 1;
 				return null;
 			}
@@ -573,10 +654,18 @@ function createDnsCache(maxEntries, maxTtl) {
 			return e;
 		},
 		put(key, body, contentType, ttl) {
+			// 单条就超过总预算：不入缓存，也不为它把别的条目淘汰掉
+			if (sizeOf(key, { body }) > maxBytes) return;
+			const prev = map.get(key);
+			if (prev) bytes -= sizeOf(key, prev);
+			const entry = { body, contentType: contentType || '', fetchedAt: Date.now(), ttl };
 			map.delete(key);
-			map.set(key, { body, contentType: contentType || '', fetchedAt: Date.now(), ttl });
-			while (map.size > maxEntries) {
-				map.delete(map.keys().next().value);
+			map.set(key, entry);
+			bytes += sizeOf(key, entry);
+			while (map.size > 0 && (map.size > maxEntries || bytes > maxBytes)) {
+				const oldest = map.keys().next().value;
+				bytes -= sizeOf(oldest, map.get(oldest));
+				map.delete(oldest);
 			}
 		},
 		get hits() {
@@ -587,6 +676,9 @@ function createDnsCache(maxEntries, maxTtl) {
 		},
 		get size() {
 			return map.size;
+		},
+		get byteSize() {
+			return bytes;
 		},
 	};
 }
@@ -631,7 +723,8 @@ function createProviderHealth(threshold, cooldownMs) {
 		snapshot() {
 			const out = {};
 			for (const [name, s] of map) {
-				out[name] = { healthy: s.fails < threshold, consecutive_failures: s.fails };
+				// 阈值 <= 0 表示熔断已关闭（allow 恒为 true），此时应一律视为健康
+				out[name] = { healthy: threshold <= 0 || s.fails < threshold, consecutive_failures: s.fails };
 			}
 			return out;
 		},
@@ -682,11 +775,11 @@ function stateFor(env) {
 	return sharedState;
 }
 
-/** 上游名 → 转移目标 URL（恒为 /dns-query + 原查询串，对齐 Go providerTarget） */
+/** 上游名 → 转移目标 URL（端点路径跟随 pathMapping + 原查询串，对齐 Go providerTarget） */
 function failoverTarget(name, url, env) {
 	const mapping = getPathMappings(env)[`/${name}`];
 	if (!mapping || !mapping.targetDomain) return null;
-	return `https://${mapping.targetDomain}/dns-query${url.search}`;
+	return `https://${mapping.targetDomain}${dohEndpointPath(mapping)}${url.search}`;
 }
 
 /**
@@ -732,7 +825,9 @@ function metricsResponse(state) {
 		payload.cache_hits = state.cache.hits;
 		payload.cache_misses = state.cache.misses;
 		payload.cache_entries = state.cache.size;
+		payload.cache_bytes = state.cache.byteSize;
 		payload.cache_max_ttl = state.cacheMaxTtl;
+		payload.cache_max_bytes = MAX_CACHE_BYTES;
 	} else {
 		payload.cache_entries = 0;
 	}
@@ -828,11 +923,11 @@ export async function proxyRequest(request, options = {}) {
 		}
 	}
 
-	// 上游候选链：失败（网络错误/超时/5xx）逐个转移；4xx 算成功原样透传
+	// 上游候选链：失败（网络错误/超时/5xx/429）逐个转移；其余 4xx 是查询本身的问题，算成功原样透传
 	const candidates = failoverCandidates(provider, state, env);
 	let upstream = null; // 成功的上游响应
 	let bufferedBody = null; // 已整读的响应体（入缓存时使用）
-	let lastUpstreamStatus = 0; // 最后一次上游 5xx 状态码
+	let lastUpstreamStatus = 0; // 最后一次上游 5xx / 429 状态码
 
 	for (const cand of candidates) {
 		const attemptUrl = cand === provider ? target.targetUrl : failoverTarget(cand, url, env);
@@ -856,7 +951,8 @@ export async function proxyRequest(request, options = {}) {
 			state.health.record(cand, false);
 			continue;
 		}
-		if (resp.status >= 500) {
+		// 上游 5xx 或限流（429）视为不可用。429 是上游在限「我们这个出口」的量，换一家才能把这次查询做成功
+		if (resp.status >= 500 || resp.status === 429) {
 			state.health.record(cand, false);
 			lastUpstreamStatus = resp.status;
 			try {
@@ -875,12 +971,10 @@ export async function proxyRequest(request, options = {}) {
 			try {
 				bufferedBody = new Uint8Array(await resp.arrayBuffer());
 				if (bufferedBody.byteLength <= MAX_BODY_BYTES) {
-					const rcode = bufferedBody[3] & 0x0f;
-					if (rcode === 0 || rcode === 3) {
-						const minTtl = dnsMinTTL(bufferedBody);
-						if (minTtl > 0) {
-							state.cache.put(cacheKey, bufferedBody, resp.headers.get('content-type') || '', Math.min(minTtl, state.cacheMaxTtl));
-						}
+					const contentType = resp.headers.get('content-type') || '';
+					const minTtl = cacheableTTL(bufferedBody, parsed, contentType);
+					if (minTtl > 0) {
+						state.cache.put(cacheKey, bufferedBody, contentType, Math.min(minTtl, state.cacheMaxTtl));
 					}
 				}
 			} catch (error) {
@@ -893,7 +987,7 @@ export async function proxyRequest(request, options = {}) {
 		break;
 	}
 
-	// 全部候选失败：最后一次是 5xx → 503，网络错误 → 502（对齐 Go）
+	// 全部候选失败：最后一次是 5xx/429 → 503，网络错误 → 502（对齐 Go）
 	if (!upstream) {
 		state.upstreamErrors += 1;
 		return plainResponse(lastUpstreamStatus ? 503 : 502, 'upstream error\n', { 'Retry-After': '2' });
@@ -941,7 +1035,11 @@ export default {
 	dnsMinTTL,
 	decrementTTLs,
 	rewriteID,
+	cacheableTTL,
+	dohEndpointPath,
 	createEdgeState,
+	createDnsCache,
+	MAX_CACHE_BYTES,
 	HOMEPAGE_HTML,
 	DEFAULT_PATH_MAPPINGS,
 };
