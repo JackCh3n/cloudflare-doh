@@ -10,6 +10,8 @@
 		"start": "wrangler dev",
 		"test": "node test/smoke.mjs",
 		"smoke": "node test/smoke.mjs",
+		"test:camo": "node test/verify-camo-shots.mjs",
+		"camo:sync": "node scripts/sync-camo.mjs",
 		"pack:edgeone": "node scripts/pack-edgeone.mjs",
 		"deploy:edgeone": "edgeone makers deploy",
 		"check:doh": "node scripts/check-doh.mjs"

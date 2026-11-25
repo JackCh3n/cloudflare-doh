@@ -19,7 +19,7 @@
 - **平台无关核心**：路由/代理逻辑集中在 `src/core.js`，两个平台只写十几行适配层
 - **参数与请求体完整透传**：保留查询串，支持 DoH 的 GET 与 POST（`application/dns-message` 二进制体）
 - **路径映射可配置**：可用环境变量 `DOMAIN_MAPPINGS` 覆盖，也可以直接改默认映射
-- **伪装 404**：未命中映射的路径（含站点根路径）返回一个「浏览器断网」样式的 404 页面，不暴露代理特征
+- **伪装 404**：未命中映射的路径（含站点根路径）返回一个「浏览器断网」样式的 404 页面，不暴露代理特征。版式与 Chrome 157 的 DNS 错误页逐像素一致（桌面 / 手机断点、深浅色、高对比度），并按浏览器界面语言显示 Chrome 全部 55 种界面语言的官方文案
 - **应答缓存与熔断转移（v1.5.0 起，三端一致）**：进程内 LRU 缓存热门查询（键不含事务 ID，POST 也命中，命中时改写 ID 并按存活时间递减 TTL、跳过 OPT）；上游连续失败熔断、按 `FAILOVER_CHAIN` 同请求内无缝转移，全部不可用时 502/503 + Retry-After
 
 ## 目录结构
@@ -37,7 +37,9 @@ cloudflare-doh/
 │   ├── go.mod
 │   └── README.md
 ├── test/
-│   └── smoke.mjs         # 零依赖冒烟测试（node test/smoke.mjs）
+│   ├── smoke.mjs               # 零依赖冒烟测试（node test/smoke.mjs）
+│   ├── capture-camo-shots.mjs  # 无头浏览器设备模拟，采集伪装页四态截图
+│   └── verify-camo-shots.mjs   # 伪装页截图验证：采集 + 解码 + 坐标/色值断言
 ├── scripts/
 │   ├── dev.bat           # 本地调试：杀旧进程 → 装依赖 → 启动 → 打开浏览器
 │   ├── kill-dev.bat      # 结束占用 8787/8088/6699 的调试进程
@@ -45,6 +47,7 @@ cloudflare-doh/
 │   ├── deploy-jp.bat     # Windows 交叉编译 + 上传日本节点（plink/pscp）
 │   ├── deploy-linux.sh   # Linux 服务器一键部署（Releases/本地二进制 → systemd）
 │   ├── doh-proxy.service # systemd 单元模板
+│   ├── sync-camo.mjs     # 伪装页三处同步：index.html → src/core.js + server/main.go
 │   ├── pack-edgeone.mjs  # 生成手动上传目录 dist/edgeone（3 个文件）
 │   └── check-doh.mjs     # 线上自检：真实 DoH 查询并解析 A 记录
 ├── Dockerfile            # Go 版容器镜像（多阶段构建，amd64/arm64）
@@ -423,10 +426,14 @@ https://dohj.example.com/cloudflare/query-dns
 ## 本地调试与测试
 
 ```bash
-npm test          # 零依赖冒烟测试，覆盖映射解析/头部剥离/POST 透传/双平台入口
+npm test          # 零依赖冒烟测试，覆盖映射解析/头部剥离/POST 透传/双平台入口/伪装页守卫
+npm run test:camo # 伪装页截图验证：无头 Chrome/Edge 设备模拟拍四态，按坐标与色值断言（Node ≥ 22）
+npm run camo:sync # 改了 index.html 后，把伪装页同步到 src/core.js 与 server/main.go
 npm run dev       # Cloudflare 本地调试（wrangler dev，默认 8787）
 scripts\dev.bat   # Windows 一键调试（杀旧进程 → 装依赖 → 启动 → 打开浏览器）
 ```
+
+伪装页只改 `index.html`（唯一来源），改完执行 `npm run camo:sync`；冒烟测试会守住三处副本一致以及嵌入约束（不能出现反引号、`${`、反斜杠）。`npm run test:camo` 默认验证的是 `src/core.js` 里**求值后**的页面，也就是 Worker / EdgeOne 实际发出去的那一份；要验证运行中的 Go 代理或线上站点，带上 `--url`：`node test/verify-camo-shots.mjs --url https://doh.example.com/`。
 
 EdgeOne 侧：
 

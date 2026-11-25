@@ -730,30 +730,120 @@ await check('请求体读取失败返回 400（对齐 Go，而不是未处理拒
 	assert.equal(r.status, 400);
 });
 
+// 伪装页源文件（index.html 是唯一来源，core.js / main.go 里的副本由 npm run camo:sync 写入）。
+// 换行统一成 LF 再比较：Windows 上 autocrlf 检出是 CRLF，而模板字符串求值与 Go 原生字符串都会丢弃 CR
+const camoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const readText = async (file) => (await readFile(path.join(camoRoot, file), 'utf8')).replace(/\r\n/g, '\n');
+const camoHTML = (await readText('index.html')).trim();
+
 await check('伪装 404 页三处副本逐字一致（core.js / index.html / main.go）', async () => {
-	const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-	const coreSrc = await readFile(path.join(root, 'src', 'core.js'), 'utf8');
-	const goSrc = await readFile(path.join(root, 'server', 'main.go'), 'utf8');
-	const html = (await readFile(path.join(root, 'index.html'), 'utf8')).trim();
+	const coreSrc = await readText('src/core.js');
+	const goSrc = await readText('server/main.go');
 	const jsHtml = coreSrc.match(/HOMEPAGE_HTML = `([\s\S]*?)`;/)[1].trim();
 	const goHtml = goSrc.match(/homepageHTML = `([\s\S]*?)`/)[1].trim();
-	assert.equal(jsHtml, html, 'core.js 与 index.html 不一致');
-	assert.equal(goHtml, html, 'main.go 与 index.html 不一致');
-	// 伪装细节守卫：按钮可点击、标题随域名、Windows 拼写正确
-	assert.match(html, /location\.reload\(\)/);
-	assert.match(html, /document\.title = location\.host/);
-	assert.doesNotMatch(html, /Windos |FINSHED/);
-	// UI 现代化守卫：深浅色自适应、按钮继承页面字体、响应式顶部留白
-	assert.match(html, /prefers-color-scheme/);
-	assert.match(html, /color-scheme/);
-	assert.match(html, /font:\s*inherit/);
-	assert.match(html, /clamp\(/);
+	assert.equal(jsHtml, camoHTML, 'core.js 与 index.html 不一致（改了页面请执行 npm run camo:sync）');
+	assert.equal(goHtml, camoHTML, 'main.go 与 index.html 不一致（改了页面请执行 npm run camo:sync）');
+	// 嵌入约束：core.js 用模板字符串、main.go 用原生字符串字面量包裹，出现以下字符会破坏嵌入
+	assert.doesNotMatch(camoHTML, /`/, '页面不能含反引号');
+	assert.doesNotMatch(camoHTML, /\$\{/, '页面不能含 "${"');
+	// 模板字符串会把反斜杠当转义序列吃掉，main.go 却原样保留：源码逐字一致但求值结果悄悄分叉
+	assert.doesNotMatch(camoHTML, /\\/, '页面不能含反斜杠（JS 字符串里改用单引号包裹）');
+});
+
+// 版式与交互守卫，全部以 Chrome 157（Windows）真实 DNS 错误页的实测结果为准
+await check('伪装 404 页版式对齐 Chrome 实测（图标 72x72 + 1x/2x、主机名、按钮位置、手机底部通栏）', () => {
+	// 标题与首行带主机名：Chrome 实测不带端口，所以用 hostname 而不是 host
+	assert.match(camoHTML, /document\.title = location\.hostname/);
+	assert.match(camoHTML, /location\.hostname\s*\|\|\s*'404'/);
+	// 图标原本按 68x18 摆放，把 72x72 的位图压成一条；Chrome 是 72x72 盒子 + image-set 按像素密度选 1x/2x
+	assert.match(camoHTML, /\.icon\{[^}]*?width:72px;\s*height:72px;/);
+	assert.match(camoHTML, /background-image:image-set\(url\("[^"]+"\) 1x,url\("[^"]+"\) 2x\);/);
+	// 桌面端按钮与正文左对齐（容器左浮动），窄屏时固定到底部
+	assert.match(camoHTML, /\.controls\{\s*float:left;/);
+	assert.match(camoHTML, /body \.nav\{\s*position:fixed;[^}]*?bottom:0;/);
+	// 深浅色自适应
+	assert.match(camoHTML, /prefers-color-scheme:dark/);
+	assert.match(camoHTML, /<meta name="color-scheme" content="light dark">/);
+	// 高对比度（强制色）模式会丢弃背景图，图标必须豁免，否则页面上少一个元素
+	assert.match(camoHTML, /@media \(forced-colors:active\)\{\s*\.icon\{\s*forced-color-adjust:none;/);
+	assert.doesNotMatch(camoHTML, /Windos |FINSHED/);
+});
+
+await check('伪装 404 页交互：重新加载可用，诊断链接是可聚焦的 <a> 且不改动地址', () => {
+	assert.match(camoHTML, /onclick=function\(\)\{location\.reload\(\)\}/);
+	assert.match(camoHTML, /<a href="javascript:void\(0\)" id="diagnose-link">/);
+	// 不能再用样式冒充链接：鼠标点不动、键盘 Tab 也到不了
+	assert.doesNotMatch(camoHTML, /<span>尝试运行/);
+	assert.doesNotMatch(camoHTML, /href="#"/, '"#" 会在点击后把 # 追加到地址栏');
+});
+
+await check('伪装 404 页多语言表：Chrome 55 种界面语言，静态兜底文案与简中条目一致', () => {
+	// 多语言表是 JS 字面量（含双引号的条目用单引号包裹），按 JS 求值而不是 JSON.parse
+	const table = camoHTML.match(/var S=\{([\s\S]*?)\n\};/);
+	assert.ok(table, '找不到多语言表 var S={...}');
+	const S = new Function(`return {${table[1]}}`)();
+	assert.equal(Object.keys(S).length, 55);
+	for (const [tag, parts] of Object.entries(S)) {
+		assert.equal(parts.length, 8, `${tag} 字段数`);
+		assert.ok(parts.slice(0, 7).every((s) => typeof s === 'string'), `${tag} 前 7 项应为字符串`);
+		assert.equal(typeof parts[7], 'number', `${tag} 第 8 项应为字体栈编号`);
+		assert.ok(parts[7] >= 0 && parts[7] < 8, `${tag} 字体栈编号越界`);
+	}
+	// 文案取自 outerHTML，实体必须还原成字符：否则用 textContent 写入时会原样显示成 "&nbsp;"
+	assert.doesNotMatch(camoHTML, /&nbsp;/);
+	assert.match(camoHTML, /var R=\{"ar":1,"fa":1,"he":1,"ur":1\};/);
+	const F = new Function(`return [${camoHTML.match(/var F=\[([\s\S]*?)\];/)[1]}]`)();
+	assert.equal(F.length, 8);
+	// 字体栈用 | 分隔，运行时拼成 CSS：带空格的名字加双引号
+	assert.deepEqual(F.map((f) => f.split('|').map((n) => (n.includes(' ') ? `"${n}"` : n)).join(', ')), [
+		'"Segoe UI", Tahoma, sans-serif',
+		'"Segoe UI", Arial, "Microsoft Yahei", sans-serif',
+		'"Segoe UI", Arial, "Microsoft Jhenghei", sans-serif',
+		'"Segoe UI", Arial, Meiryo, sans-serif',
+		'"Segoe UI", Arial, "Malgun Gothic", Gulim, sans-serif',
+		'Tahoma, sans-serif',
+		'Vrinda',
+		'"Segoe UI", Arial, AnjaliOldLipi, Rachana, Kartika',
+	]);
+	// 静态标记里的简中文案（无脚本时的兜底）必须与表里的 zh-CN 条目相同
+	const [heading, p1, , s1, link, s2, button] = S['zh-CN'];
+	assert.match(camoHTML, new RegExp(`<h1><span id="heading">${heading}</span></h1>`));
+	assert.match(camoHTML, new RegExp(`<p id="typo">${p1}<span id="host"></span>`));
+	assert.match(camoHTML, new RegExp(`<span id="s1">${s1}</span><a href="javascript:void\\(0\\)" id="diagnose-link">${link}</a><span id="s2">${s2}</span>`));
+	assert.match(camoHTML, new RegExp(`<button id="reload-button">${button}</button>`));
+});
+
+await check('伪装 404 页语言选择：精确匹配 → 主语言回退（zh/pt/en）→ 英文', () => {
+	// pick 依赖页面里的小写键索引 L：连同 L 一起求值
+	const i18n = camoHTML.match(/var S=\{[\s\S]*?\n\};/)[0];
+	const index = camoHTML.match(/var L=\{\};\nfor\(var k in S\)L\[k\.toLowerCase\(\)\]=k;/)[0];
+	const pickSrc = camoHTML.match(/var pick=(function\(t\)\{[\s\S]*?\n\});/)[1];
+	const pick = new Function(`${i18n}\n${index}\nreturn ${pickSrc}`)();
+	// 页面先把 navigator.language 转成小写再调用 pick；表里的键是 en-GB / pt-PT 这类规范写法，
+	// 必须大小写不敏感地命中，否则英式英语、葡萄牙 Portuguese 会落到别的条目
+	assert.equal(pick('zh-cn'), 'zh-CN');
+	assert.equal(pick('zh'), 'zh-CN');
+	assert.equal(pick('zh-hans-sg'), 'zh-CN');
+	assert.equal(pick('zh-tw'), 'zh-TW');
+	assert.equal(pick('zh-hk'), 'zh-TW');
+	assert.equal(pick('zh-hant'), 'zh-TW');
+	assert.equal(pick('pt'), 'pt-BR');
+	assert.equal(pick('pt-br'), 'pt-BR');
+	assert.equal(pick('pt-pt'), 'pt-PT');
+	assert.equal(pick('pt-ao'), 'pt-BR');
+	assert.equal(pick('en'), 'en-US');
+	assert.equal(pick('en-us'), 'en-US');
+	assert.equal(pick('en-gb'), 'en-GB');
+	assert.equal(pick('en-au'), 'en-US');
+	assert.equal(pick('es'), 'es');
+	assert.equal(pick('es-419'), 'es-419');
+	assert.equal(pick('sv'), 'sv');
+	assert.equal(pick('xx-yy'), 'en-US');
+	assert.equal(pick('si-lk'), 'en-US'); // 非 Chrome 界面语言
 });
 
 await check('HOMEPAGE_HTML 导出与 index.html 一致（入口直用场景）', () => {
-	const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-	// HOMEPAGE_HTML 已在上方导入；这里只做快速一致性冒烟（完整三处守卫见上一用例）
-	assert.equal(typeof HOMEPAGE_HTML, 'string');
+	assert.equal(HOMEPAGE_HTML.trim(), camoHTML);
 	assert.match(HOMEPAGE_HTML, /无法访问此网站/);
 });
 

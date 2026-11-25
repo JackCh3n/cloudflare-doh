@@ -1,101 +1,441 @@
 <!DOCTYPE html>
-<html lang="zh-CN">
+<html lang="zh-CN" dir="ltr">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="color-scheme" content="light dark">
+    <meta name="theme-color" content="#fff" media="(prefers-color-scheme: light)">
+    <meta name="theme-color" content="#202124" media="(prefers-color-scheme: dark)">
     <title>404</title>
-    <script>document.title = location.host || '404';</script>
+    <script>document.title = location.hostname || '404';</script>
     <style>
+        html{
+            font-size:125%;
+            -webkit-text-size-adjust:100%;
+        }
         body{
-            font-family: system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
-            margin: 0;
-            background-color: #fff;
+            --bg:#fff;
+            --heading-color:#202124;
+            --error-code-color:#5f6368;
+            --link-color:#1a73e8;
+            --button-bg:#1a73e8;
+            --button-bg-active:#1967d2;
+            --button-text:#fff;
+            margin:8px;
+            font-family:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+            font-size:75%;
+            line-height:1.6em;
+            color:#5f6368;
+            background-color:var(--bg);
+            word-wrap:break-word;
         }
-        .main{
-            width: 600px;
-            max-width: 92%;
-            margin: 0 auto;
-            padding-top: clamp(48px, 14vh, 125px);
-            box-sizing: border-box;
+        .interstitial{
+            box-sizing:border-box;
+            font-size:1em;
+            line-height:1.6em;
+            margin:14vh auto 0;
+            max-width:600px;
+            width:100%;
         }
-        img{
-            margin-bottom: 20px;
+        .icon{
+            display:inline-block;
+            width:72px;
+            height:72px;
+            margin:0 0 40px;
+            background-image:url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEgAAABIAQMAAABvIyEEAAAABlBMVEUAAABTU1OoaSf/AAAAAXRSTlMAQObYZgAAAENJREFUeF7tzbEJACEQRNGBLeAasBCza2lLEGx0CxFGG9hBMDDxRy/72O9FMnIFapGylsu1fgoBdkXfUHLrQgdfrlJN1BdYBjQQm3UAAAAASUVORK5CYII=");
+            background-image:image-set(url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEgAAABIAQMAAABvIyEEAAAABlBMVEUAAABTU1OoaSf/AAAAAXRSTlMAQObYZgAAAENJREFUeF7tzbEJACEQRNGBLeAasBCza2lLEGx0CxFGG9hBMDDxRy/72O9FMnIFapGylsu1fgoBdkXfUHLrQgdfrlJN1BdYBjQQm3UAAAAASUVORK5CYII=") 1x,url("data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAJAAAACQAQMAAADdiHD7AAAABlBMVEUAAABTU1OoaSf/AAAAAXRSTlMAQObYZgAAAFJJREFUeF7t0cENgDAMQ9FwYgxG6WjpaIzCCAxQxVggFuDiCvlLOeRdHR9yzjncHVoq3npu+wQUrUuJHylSTmBaespJyJQoObUeyxDQb3bEm5Au81c0pSCD8HYAAAAASUVORK5CYII=") 2x);
+            background-repeat:no-repeat;
+            background-size:100%;
+            -webkit-user-select:none;
+            user-select:none;
         }
-        p{
-            font-size: 14px;
-            color: rgb(32, 33, 36);
+        h1{
+            margin:0 0 16px;
+            color:var(--heading-color);
+            font-size:1.6em;
+            font-weight:normal;
+            line-height:1.25em;
+            word-wrap:break-word;
+        }
+        h1 span{
+            font-weight:500;
+        }
+        .message > p{
+            display:inline;
+            margin:15px 0;
+        }
+        .suggestions ul{
+            list-style-type:none;
+            margin-top:15px;
+            padding-inline-start:0;
+        }
+        a{
+            color:var(--link-color);
+            text-decoration:none;
         }
         .error-code{
-            font-size: 12px;
-            color: rgb(95, 99, 104);
+            margin-top:12px;
+            color:var(--error-code-color);
+            font-size:.8em;
+            text-transform:uppercase;
         }
-        span{
-            color: rgb(26, 115, 232);
-            cursor: pointer;
+        .nav{
+            margin-top:51px;
         }
-        span:hover{
-            border-bottom: 1px solid rgb(26, 115, 232);
+        .nav::after{
+            clear:both;
+            content:'';
+            display:table;
+            width:100%;
+        }
+        .controls{
+            float:left;
         }
         button{
-            float: right;
-            margin-top: 60px;
-            font: inherit;
-            font-size: 14px;
-            background-color: #1a73e8;
-            color: #fff;
-            border: 0;
-            border-radius: 20px;
-            padding: 10px 24px;
-            cursor: pointer;
-        }
-        button:hover{
-            background-color: #1765cc;
+            float:right;
+            margin:0;
+            padding:8px 16px;
+            border:0;
+            border-radius:20px;
+            box-sizing:border-box;
+            font-size:.875em;
+            color:var(--button-text);
+            background-color:var(--button-bg);
+            cursor:pointer;
+            -webkit-user-select:none;
+            user-select:none;
         }
         button:active{
-            background-color: #145bb3;
+            background-color:var(--button-bg-active);
+            outline:0;
         }
-        @media (prefers-color-scheme: dark){
-            body{
-                background-color: #202124;
+        @media (max-width:700px){
+            .interstitial{
+                padding:0 10%;
             }
-            img{
-                filter: invert(1);
+        }
+        @media (max-width:420px){
+            .interstitial{
+                padding:0 5%;
             }
-            p{
-                color: rgb(232, 234, 237);
+            .nav{
+                margin-top:30px;
             }
-            .error-code{
-                color: rgb(154, 160, 166);
-            }
-            span{
-                color: rgb(138, 180, 248);
-            }
-            span:hover{
-                border-bottom-color: rgb(138, 180, 248);
+            .controls{
+                float:none;
             }
             button{
-                background-color: #8ab4f8;
-                color: #202124;
+                float:none;
+                width:100%;
+                margin:0;
+                padding:16px 24px;
+                font-size:.825em;
+                font-weight:500;
             }
-            button:hover{
-                background-color: #a3c4fa;
+        }
+        /* 手机与矮窗口：按钮固定在屏幕底部 */
+        @media (min-width:240px) and (max-width:420px) and (min-height:401px),(min-width:421px) and (min-height:240px) and (max-height:560px){
+            .interstitial{
+                max-width:736px;
             }
-            button:active{
-                background-color: #93b8fb;
+            .main{
+                padding-bottom:40px;
+            }
+            body .nav{
+                position:fixed;
+                left:0;
+                right:0;
+                bottom:0;
+                z-index:2;
+                width:100%;
+                max-width:736px;
+                margin:0 auto;
+                padding-left:24px;
+                padding-right:24px;
+                background-color:var(--bg);
+                box-shadow:0 -12px 24px var(--bg);
+            }
+        }
+        @media (max-width:420px) and (orientation:portrait),(max-height:560px){
+            body{
+                margin:0 auto;
+            }
+            .interstitial{
+                position:relative;
+                box-sizing:border-box;
+                margin:7vh auto 12px;
+                padding:0 24px;
+            }
+            .interstitial p{
+                font-size:.95em;
+                line-height:1.61em;
+                margin-top:8px;
+            }
+            .suggestions ul{
+                margin-top:8px;
+            }
+            .icon{
+                margin-bottom:5.69vh;
+            }
+            h1{
+                font-size:1.5em;
+                margin-bottom:8px;
+            }
+            .controls{
+                margin:0;
+            }
+            .nav{
+                box-sizing:border-box;
+                width:100%;
+                padding-bottom:8px;
+            }
+            button{
+                font-family:Roboto-Regular,Helvetica;
+                font-size:.933em;
+                margin:6px 0;
+                transform:translatez(0);
+            }
+        }
+        @media (min-width:421px) and (min-height:500px) and (max-height:560px){
+            .interstitial{
+                margin-top:10vh;
+            }
+        }
+        @media (min-height:400px) and (orientation:portrait){
+            .interstitial{
+                margin-bottom:145px;
+            }
+        }
+        @media (min-height:299px){
+            .nav{
+                padding-bottom:16px;
+            }
+        }
+        @media (min-height:500px) and (max-height:650px) and (max-width:414px) and (orientation:portrait){
+            .interstitial{
+                margin-top:7vh;
+            }
+        }
+        @media (min-height:650px) and (max-width:414px) and (orientation:portrait){
+            .interstitial{
+                margin-top:10vh;
+            }
+        }
+        /* 过小的屏幕（横条 / 小窗）：按钮不固定，跟在正文后面 */
+        @media (max-height:400px) and (orientation:portrait),(max-height:239px) and (orientation:landscape),(max-width:419px) and (max-height:399px){
+            .interstitial{
+                display:flex;
+                flex-direction:column;
+                margin-bottom:0;
+            }
+            .main{
+                flex:1 1 auto;
+                order:0;
+            }
+            .nav{
+                position:relative;
+                flex:0 1 auto;
+                order:1;
+                width:100%;
+                margin-top:8px;
+                padding-left:0;
+                padding-right:0;
+            }
+            button{
+                padding:16px 24px;
+            }
+        }
+        @media (max-width:239px) and (orientation:portrait){
+            .nav{
+                padding-left:0;
+                padding-right:0;
+            }
+        }
+        @media (max-width:640px),(max-height:640px){
+            h1{
+                margin:0 0 15px;
+            }
+        }
+        @media (max-height:350px){
+            h1{
+                margin:0 0 15px;
+            }
+            .interstitial{
+                margin-top:5%;
+            }
+            .nav{
+                margin-top:30px;
+            }
+        }
+        @media (min-width:420px) and (max-width:736px) and (min-height:240px) and (max-height:420px) and (orientation:landscape){
+            .interstitial{
+                margin-bottom:100px;
+            }
+        }
+        @media (max-width:240px){
+            .interstitial{
+                padding:0 8px;
+            }
+            button{
+                padding-left:12px;
+                padding-right:12px;
+            }
+        }
+        @media (max-width:120px){
+            button{
+                width:auto;
+            }
+        }
+        /* 高对比度（Windows 强制色）模式会丢弃背景图：图标豁免，否则页面少一个元素 */
+        @media (forced-colors:active){
+            .icon{
+                forced-color-adjust:none;
+            }
+        }
+        @media (prefers-color-scheme:dark){
+            body{
+                --bg:#202124;
+                --heading-color:#9aa0a6;
+                --error-code-color:#9aa0a6;
+                --link-color:#8ab4f8;
+                --button-bg:#8ab4f8;
+                --button-bg-active:#81a2d0;
+                --button-text:#202124;
+                color:#9aa0a6;
+            }
+            .icon{
+                filter:invert(1);
             }
         }
     </style>
 </head>
 <body>
-    <div class="main">
-        <img src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAEgAAABIAQMAAABvIyEEAAAABlBMVEUAAABTU1OoaSf/AAAAAXRSTlMAQObYZgAAAENJREFUeF7tzbEJACEQRNGBLeAasBCza2lLEGx0CxFGG9hBMDDxRy/72O9FMnIFapGylsu1fgoBdkXfUHLrQgdfrlJN1BdYBjQQm3UAAAAASUVORK5CYII=" alt="" width="68" height="18">
-        <p style="font-size:24px;">无法访问此网站</p>
-        <p>检查是否有拼写错误。</p>
-        <p>如果拼写无误，请<span>尝试运行 Windows 网络诊断</span>。</p>
-        <p class="error-code">DNS_PROBE_FINISHED_NXDOMAIN</p>
-        <button onclick="location.reload()">重新加载</button>
+    <div class="interstitial">
+        <div class="main">
+            <!-- 图标取自 Chromium 网络错误页资源（BSD-3-Clause）；1x/2x 由 image-set 按像素密度选用 -->
+            <div class="icon"></div>
+            <div class="message">
+                <h1><span id="heading">无法访问此网站</span></h1>
+                <p id="typo">检查 <span id="host"></span> 中是否有拼写错误。</p>
+                <div class="suggestions">
+                    <ul>
+                        <li><span id="s1">如果拼写无误，请</span><a href="javascript:void(0)" id="diagnose-link">尝试运行 Windows 网络诊断</a><span id="s2">。</span></li>
+                    </ul>
+                </div>
+                <div class="error-code">DNS_PROBE_FINISHED_NXDOMAIN</div>
+            </div>
+        </div>
+        <div class="nav">
+            <div class="controls">
+                <button id="reload-button">重新加载</button>
+            </div>
+        </div>
     </div>
-
+    <script>
+(function(){
+/* 各界面语言的错误页文案（取自 Chrome 157 Windows 版实际渲染结果）。
+   每条：[标题, 首段前, 首段后, 建议句前, 链接文字, 建议句后, 按钮文字, 字体栈编号] */
+/* i18n:begin */
+var S={
+	"af":["Hierdie werf kan nie bereik word nie","Kyk of daar 'n tikfout is in ",".","As die spelling korrek is, kan jy ","Windows Network Diagnostics probeer gebruik",".","Herlaai",0],
+	"am":["ይህ ጣቢያ ሊደረስበት አይችልም","በ"," ውስጥ የፊደል ግድፈት ካለ ይፈትሹ።","የፊደል አጻጻፉ ትክክል ከሆነ ","የWindows አውታረ መረብ ምርመራን ለማስኬድ ይሞክሩ","።","ዳግም ጫን",0],
+	"ar":["لا يمكن الوصول إلى الموقع الإلكتروني هذا","تحقَّق ما إذا ورد خطأ إملائي في ",".","‏إذا تم التأكُد من عدم ورود أخطاء إملائية، يُرجى ","محاولة تشغيل بيانات التشخيص لشبكة Windows",".","إعادة التحميل",0],
+	"bg":["Няма достъп до този сайт","Проверете дали "," е изписано правилно.","Ако изписването е правилно, ","стартирайте мрежова диагностика в Windows",".","Повторно зареждане",0],
+	"bn":["এই সাইটটিতে পৌছানো যাচ্ছে না","","-এ কোনও বানান ভুল লেখা হয়েছে কিনা তা চেক করে দেখুন।","বানান সঠিক হলে, ","'Windows নেটওয়ার্ক ডায়াগনস্টিক' টুল চালিয়ে দেখুন","।","রিলোড করুন",6],
+	"ca":["No es pot accedir a aquest lloc web","Comprova si "," està ben escrit.","Si està ben escrit, ","prova d'executar el diagnòstic de xarxes de Windows",".","Torna a carregar",0],
+	"cs":["Tento web není dostupný","Zkontrolujte, zda v adrese "," nemáte překlep.","Pokud je adresa zadána správně, ","zkuste spustit Diagnostiku sítě systému Windows",".","Načíst znovu",0],
+	"da":["Der kan ikke oprettes forbindelse til dette website","Tjek, om der er en stavefejl i ",".","Hvis stavningen er korrekt, kan du ","prøve at køre Windows Netværksdiagnosticering",".","Genindlæs",0],
+	"de":["Die Website ist nicht erreichbar","Prüfe, ob „","“ einen Tippfehler enthält.","Wenn die URL keinen Tippfehler enthält, ","kannst du die Windows-Netzwerkdiagnose durchführen",".","Neu laden",0],
+	"el":["Δεν είναι δυνατή η πρόσβαση σε αυτόν τον ιστότοπο","Ελέγξτε μήπως υπάρχει κάποιο ορθογραφικό λάθος στη διεύθυνση ",".","Εάν δεν υπάρχει ορθογραφικό λάθος, ","δοκιμάστε να εκτελέσετε έναν έλεγχο Διαγνωστικών δικτύου των Windows",".","Επαναφόρτωση",0],
+	"en-GB":["This site can’t be reached","Check if there is a typo in ",".","If spelling is correct, ","try running windows network Diagnostics",".","Reload",0],
+	"en-US":["This site can’t be reached","Check if there is a typo in ",".","If spelling is correct, ","try running Windows Network Diagnostics",".","Reload",0],
+	"es-419":["No se puede acceder a este sitio","Revisa que no haya errores de ortografía en ",".","Si no hay errores, ","prueba ejecutar el diagnóstico de red de Windows",".","Volver a cargar",0],
+	"es":["No se puede acceder a este sitio web","Comprueba si hay un error de escritura en ",".","Si está escrito correctamente, ","prueba a ejecutar el diagnóstico de red de Windows",".","Volver a cargar",0],
+	"et":["Selle saidiga ei saa ühendust","Kontrollige, kas nimes "," on kirjaviga.","Kui õigekirjavigu pole, ","käitage Windowsi võrgudiagnostika",".","Laadi uuesti",0],
+	"fa":["نمی‌توان به این سایت دست یافت","احتمال وجود غلط املائی در "," را بررسی کنید.","‏اگر املا صحیح است، ","«عیب‌یابی شبکه Windows» را اجرا کنید",".","مجدد بار کردن",0],
+	"fi":["Sivustoon ei saada yhteyttä","Tarkista, sisältääkö "," kirjoitusvirheitä.","Jos kirjoitusasu on oikein, ","kokeile Windowsin verkon diagnostiikkaa",".","Lataa uudelleen",0],
+	"fil":["Hindi makakonekta sa site na ito","Tingnan kung may typo sa ",".","Kung tama ang pagbabaybay, ","subukang patakbuhin ang Mga Diagnostic ng Network ng Windows",".","I-reload",0],
+	"fr":["Ce site est inaccessible","Vérifiez si l'adresse "," est correcte.","S'il n'y a pas d'erreur, essayez de ","faire un diagnostic réseau Windows",".","Actualiser",0],
+	"gu":["આ સાઇટ પર પહોંચી શકાતું નથી","ચેક કરો કે ","માં કોઈ ટાઇપિંગ ભૂલ તો નથી ને.","જો જોડણી સાચી હોય, તો ","Windows નેટવર્ક નિદાન ચલાવવાનો પ્રયાસ કરી જુઓ",".","ફરીથી લોડ કરો",0],
+	"he":["לא ניתן לגשת לאתר הזה","יש לבדוק אם יש שגיאה בהקלדה ב-",".","‏אם האיות תקין, ","יש לנסות להפעיל את אבחון הרשת של Windows",".","טעינה מחדש",0],
+	"hi":["इस साइट तक नहीं पहुंचा जा सकता","देखें कि "," की स्पेलिंग गलत तो नहीं है.","अगर स्पेलिंग सही है, तो ","Windows नेटवर्क डायग्नोस्टिक्स टूल चलाकर देखें",".","फिर लोड करें",0],
+	"hr":["Web-lokacija ne može se dohvatiti","Provjerite sadrži li naziv "," pravopisnu pogrešku.","Ako nema pravopisnih pogrešaka, ","pokušajte pokrenuti Mrežnu dijagnostiku sustava Windows",".","Ponovno učitaj",0],
+	"hu":["A webhely nem érhető el","Ellenőrizze, hogy van-e elírás a(z) "," domainnévben.","Ha helyesen írta, ","próbálkozzon a Windows hálózati diagnosztikájának futtatásával",".","Újratöltés",0],
+	"id":["Situs ini tidak dapat dijangkau","Periksa apakah ada kesalahan ketik di ",".","Jika ejaan sudah benar, ","coba jalankan Diagnostik Jaringan Windows",".","Muat ulang",0],
+	"it":["Impossibile raggiungere il sito","Controlla eventuali errori di battitura in ",".","Se l'ortografia è corretta, ","prova a eseguire lo strumento Diagnostica di rete Windows",".","Ricarica",0],
+	"ja":["このサイトにアクセスできません",""," にタイプミスがないか確認してください。","タイプミスでない場合は、","Windows ネットワーク診断をお試しください","。","再読み込み",3],
+	"kn":["ಈ ಸೈಟ್ ತಲುಪಲಾಗುವುದಿಲ್ಲ",""," ನ ಕಾಗುಣಿತ ತಪ್ಪಾಗಿದೆಯೇ ಎಂದು ಪರಿಶೀಲಿಸಿ.","ಕಾಗುಣಿತ ಸರಿಯಾಗಿದ್ದರೆ, ","Windows ನೆಟ್‌ವರ್ಕ್ ಡಯಾಗ್ನಾಸ್ಟಿಕ್ಸ್‌‌ ರನ್ ಮಾಡಿ ನೋಡಿ",".","ಮರುಲೋಡ್‌",0],
+	"ko":["사이트에 연결할 수 없음","","에 오타가 있는지 확인하세요.","철자가 올바르다면 ","Windows 네트워크 진단을 실행","해 보세요.","새로고침",4],
+	"lt":["Nepavyksta pasiekti šios svetainės","Patikrinkite, ar pavadinime "," nėra klaidos.","Jei parašyta tinkamai, ","pabandykite paleisti „Windows“ tinklo diagnostiką",".","Įkelti iš naujo",0],
+	"lv":["Šī vietne nav sasniedzama","Pārbaudiet, vai adresē "," nav pareizrakstības kļūdas.","Ja nav pareizrakstības kļūdu, ","mēģiniet palaist Windows tīkla diagnostiku",".","Pārlādēt",0],
+	"ml":["ഈ സൈറ്റ് ലഭ്യമാക്കാനാകുന്നില്ല",""," എന്നതിൽ അക്ഷരത്തെറ്റ് ഉണ്ടോ എന്ന് പരിശോധിക്കുക.","അക്ഷരങ്ങൾ ശരിയാണെങ്കിൽ, ","Windows നെറ്റ്‌വർക്ക് ഡയഗണോസ്‌റ്റിക്‌സ് റൺ ചെയ്‌തുനോക്കൂ",".","വീണ്ടും ലോഡ് ചെയ്യുക",7],
+	"mr":["या साइटवर पोहचणे शक्य नाही",""," मध्ये टायपो आहे का ते तपासा.","शब्दलेखन योग्य असल्यास, ","Windows नेटवर्क निदान रन करून पहा",".","रीलोड करा",0],
+	"ms":["Tapak ini tidak dapat dicapai","Semak jika terdapat kesilapan ejaan dalam ",".","Jika ejaan sudah betul, ","cuba jalankan Diagnostik Rangkaian Windows",".","Muat Semula",0],
+	"nb":["Dette nettstedet er ikke tilgjengelig","Sjekk om det er en skrivefeil i ",".","Hvis stavemåten er korrekt, kan du ","prøve å kjøre Windows Nettverksdiagnose",".","Last inn på nytt",0],
+	"nl":["Deze site is niet bereikbaar","Check of "," een typfout bevat.","Als de spelling klopt, ","voer je een Windows-netwerkcontrole uit",".","Opnieuw laden",0],
+	"pl":["Ta witryna jest nieosiągalna","Sprawdź, czy w adresie "," nie ma błędu.","Jeśli pisownia jest poprawna, ","uruchom Diagnostykę sieci systemu Windows",".","Odśwież",0],
+	"pt-BR":["Não é possível acessar esse site","Verifique se há um erro de digitação em ",".","Se o endereço estiver correto, ","tente executar o Diagnóstico de Rede do Windows",".","Recarregar",0],
+	"pt-PT":["Não é possível aceder a este site","Verifique se existe algum erro ortográfico em ",".","Se a ortografia estiver correta, ","experimente executar o Diagnóstico de rede do Windows",".","Recarregar",0],
+	"ro":["Acest site nu poate fi accesat","Verifică dacă există vreo greșeală de scriere în ",".","Dacă scrierea este corectă, ","încearcă să rulezi Diagnosticarea rețelei Windows",".","Reîncarcă",0],
+	"ru":["Не удается получить доступ к сайту","Проверьте, нет ли опечаток в имени хоста ",".","Если все правильно, ",'воспользуйтесь инструментом "Диагностика сетей Windows"',".","Перезагрузить",0],
+	"sk":["Tento web je nedostupný","Skontrolujte, či nie je v názve "," preklep.","Ak je pravopis správny, ","skúste spustiť nástroj Windows Network Diagnostics",".","Znova načítať",0],
+	"sl":["Tega spletnega mesta ni mogoče doseči","Preverite, ali so v "," tipkarske napake.","Če je črkovanje pravilno, ","poskušajte zagnati orodje za omrežno diagnostiko sistema Windows",".","Znova naloži",0],
+	"sr":["Овај сајт није доступан","Уверите се да "," не садржи словне грешке.","Ако нема грешака, ","покрените Windows дијагностику мреже",".","Учитај поново",0],
+	"sv":["Webbplatsen kan inte nås","Kontrollera om det finns ett stavfel i ",".","Om stavningen är rätt ","testar du att köra nätverksdiagnostik för Windows",".","Läs in på nytt",0],
+	"sw":["Imeshindwa kufungua tovuti hii","Angalia iwapo kuna kosa la hijai kwenye ",".","Iwapo hakuna kosa la hijai, ","jaribu kutekeleza Uchunguzi wa Mtandao",".","Pakia upya",0],
+	"ta":["இந்தத் தளத்தை அணுக முடியவில்லை",""," என்பதில் எழுத்துப்பிழை உள்ளதா எனப் பார்க்கவும்.","எழுத்துப்பிழை இல்லையெனில் ","Windows நெட்வொர்க் சரிபார்ப்பை இயக்கிப் பார்க்கவும்",".","மீண்டும் ஏற்று",0],
+	"te":["ఈ సైట్‌ను చేరుకోలేకపోయాము","","లో అక్షర దోషం ఉందేమో చెక్ చేయండి.","స్పెల్లింగ్ సరైనది అయితే, ","విండోల సమస్య విశ్లేషణలను రన్ చేయడానికి ట్రై చేయండి",".","మళ్లీ లోడ్ చేయి",0],
+	"th":["ไม่สามารถเข้าถึงเว็บไซต์นี้","ตรวจสอบว่ามีการพิมพ์ผิดใน "," ไหม","หากการสะกดถูกต้อง ให้","ลองเรียกใช้การวินิจฉัยเครือข่ายของ Windows","","โหลดใหม่",5],
+	"tr":["Bu siteye ulaşılamıyor",""," yazımında hata olup olmadığını kontrol edin.","Yazım doğruysa ","Windows Ağ Teşhisi'ni çalıştırmayı deneyin",".","Yeniden Yükle",0],
+	"uk":["Немає зв’язку із сайтом","Перевірте, чи немає описки в імені хосту ",".","Якщо помилок немає, ","проведіть діагностику мережі Windows",".","Перезавантажити",0],
+	"ur":["اس سائٹ تک رسائی حاصل نہیں کی جا سکتی ہے","چیک کریں کہ آیا "," میں کوئی ہجوں کی کوئی غلطی تو نہیں۔","‏اگر ہجے درست ہیں تو ","Windows نیٹ ورک کی تشخیصات چلانے کی کوشش کریں","۔","دوبارہ لوڈ کریں",0],
+	"vi":["Không thể truy cập trang web này","Kiểm tra xem có lỗi chính tả trong "," hay không.","Nếu đúng chính tả, hãy ","thử chạy Chẩn đoán mạng của Windows",".","Tải lại",0],
+	"zh-CN":["无法访问此网站","检查 "," 中是否有拼写错误。","如果拼写无误，请","尝试运行 Windows 网络诊断","。","重新加载",1],
+	"zh-TW":["無法連上這個網站","請檢查 "," 中是否有錯字。","如果拼字正確，","請嘗試執行 Windows 網路診斷","。","重新載入",2]
+};
+var F=[
+	"Segoe UI|Tahoma|sans-serif",
+	"Segoe UI|Arial|Microsoft Yahei|sans-serif",
+	"Segoe UI|Arial|Microsoft Jhenghei|sans-serif",
+	"Segoe UI|Arial|Meiryo|sans-serif",
+	"Segoe UI|Arial|Malgun Gothic|Gulim|sans-serif",
+	"Tahoma|sans-serif",
+	"Vrinda",
+	"Segoe UI|Arial|AnjaliOldLipi|Rachana|Kartika"
+];
+var R={"ar":1,"fa":1,"he":1,"ur":1};
+/* i18n:end */
+var el=function(id){return document.getElementById(id)};
+var host=location.hostname||'404';
+el('host').textContent=host;
+var t=String(navigator.language||'').toLowerCase();
+// 表里的键是 Chrome 的规范写法（en-GB / pt-PT / zh-CN），而 t 已转成小写：另建一张小写键的索引
+var L={};
+for(var k in S)L[k.toLowerCase()]=k;
+var pick=function(t){
+    if(L[t])return L[t];
+    var p=t.split('-')[0];
+    if(p==='zh')return /(?:^|-)(tw|hk|mo|hant)(?:-|$)/.test(t)?'zh-TW':'zh-CN';
+    if(L[p])return L[p];
+    return p==='pt'?'pt-BR':'en-US';
+};
+var tag=t?pick(t):'zh-CN';
+var s=S[tag];
+el('heading').textContent=s[0];
+el('typo').textContent=s[1]+host+s[2];
+el('s1').textContent=s[3];
+el('diagnose-link').textContent=s[4];
+el('s2').textContent=s[5];
+el('reload-button').textContent=s[6];
+document.documentElement.lang=tag.split('-')[0];
+document.documentElement.dir=R[tag]?'rtl':'ltr';
+// Windows 上按语言换用 Chrome 的字体栈，其余平台沿用系统字体（与 Chrome 一致）。
+// F 用 | 分隔字体名，带空格的名字加双引号
+if(/win/i.test((navigator.userAgentData&&navigator.userAgentData.platform)||navigator.platform||'')){
+    document.body.style.fontFamily=F[s[7]].split('|').map(function(f){return f.indexOf(' ')>=0?'"'+f+'"':f}).join(', ');
+}
+el('reload-button').onclick=function(){location.reload()};
+})();
+    </script>
 </body>
 </html>
