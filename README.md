@@ -47,8 +47,8 @@ cloudflare-doh/
 ## 工作原理
 
 1. 取请求路径，按**最长前缀**匹配映射表（避免 `/google` 抢占 `/google-v2`）
-2. 命中后去掉前缀，按 `pathMapping` 重写剩余路径，拼出目标 URL 并保留查询串
-3. 用 `fetch` 反向代理：剥离 `host`/`content-length`，非 GET/HEAD 方法把请求体读成 `ArrayBuffer` 再转发
+2. 命中后去掉前缀，按 `pathMapping` 的最长规则重写剩余路径，拼出目标 URL 并保留查询串
+3. 用 `fetch` 反向代理：剥离 `host`/`content-length`/`accept-encoding` 与逐跳头，非 GET/HEAD 方法把请求体读成 `ArrayBuffer` 再转发；上游网络错误返回 `502 + Retry-After`（`no-store`）
 4. 未命中则返回伪装 404 页面
 
 ### 默认路径映射
@@ -91,7 +91,7 @@ cloudflare-doh/
 | `DOMAIN_MAPPINGS` | 覆盖整张路径映射表（JSON 字符串或对象） | 内置 6 家 |
 | `ALLOWED_HOSTS` | 允许访问的 Host 白名单，逗号分隔；配置后其余域名一律返回伪装 404 | 不限制 |
 | `CACHE_TTL` | `GET + application/dns-message` 响应的缓存秒数；`0` 表示完全不缓存 | `0` |
-| `DEFAULT_UPSTREAM` | 裸路径（`/`、`/dns-query`、`/query-dns`）兜底走哪家上游 | `cloudflare` |
+| `DEFAULT_UPSTREAM` | 裸路径（`/`、`/dns-query`、`/query-dns`）兜底走哪家上游（不区分大小写） | `cloudflare` |
 
 地址形式都可用（`DEFAULT_UPSTREAM=cloudflare` 时等价）：
 
@@ -101,6 +101,8 @@ https://doh.example.com/dns-query            # 标准 DoH 路径
 https://doh.example.com/query-dns            # 本项目的别名
 https://doh.example.com/cloudflare/query-dns # 显式指定上游
 ```
+
+裸路径打的是上游的 DoH 端点：`pathMapping` 把 `/dns-query` 或 `/query-dns` 映射到别处时（如 `dns.nextdns.io/<profile>`），裸路径跟着映射走。
 
 Cloudflare 侧写在 `wrangler.jsonc` 的 `vars`（或控制台「变量和机密」）；EdgeOne 侧写在项目根目录 `.env`。
 
@@ -295,7 +297,7 @@ https://doh.example.com/cloudflare/query-dns
 ## 本地调试与测试
 
 ```bash
-npm test          # 零依赖冒烟测试，覆盖映射解析/头部剥离/POST 透传/双平台入口
+npm test          # 零依赖冒烟测试，覆盖映射解析/头部剥离/POST 透传/双平台入口/路径重写与裸路径端点/异常应答
 npm run dev       # Cloudflare 本地调试（wrangler dev，默认 8787）
 scripts\dev.bat   # Windows 一键调试（杀旧进程 → 装依赖 → 启动 → 打开浏览器）
 ```
@@ -311,7 +313,7 @@ edgeone makers deploy -e preview   # 部署到预览环境验证
 
 ### 线上自检（真实 DoH 查询）
 
-`scripts/check-doh.mjs` 会对指定站点逐个上游发真实 `POST application/dns-message` 查询，解析应答并打印 A 记录，用来确认「转发真的能出结果」而不只是「页面上有点东西」。
+`scripts/check-doh.mjs` 会对指定站点逐个上游发真实 `POST application/dns-message` 查询，解析应答并打印 A 记录，用来确认「转发真的能出结果」而不只是「页面上有点东西」。应答不是合法 DNS 报文（门户 / 错误页、JSON、被截断）、连接中途断开、超时，都会给出对应的失败结论，不会中途崩溃或卡住。
 
 ```bash
 # 自定义域名（证书还没签发时加 --insecure，本地 DNS 解析不到时加 --ip 直连）
