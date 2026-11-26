@@ -169,7 +169,17 @@ func loadConfig() Config {
 		CBCooldown:      time.Duration(envInt("CB_COOLDOWN_SEC", 30)) * time.Second,
 	}
 
-	// 故障转移链：默认 cloudflare → google → adguard（全部海外可达且无过滤差异主嫌时可用）
+	if raw := strings.TrimSpace(os.Getenv("DOMAIN_MAPPINGS")); raw != "" {
+		var parsed map[string]Mapping
+		if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
+			log.Printf("DOMAIN_MAPPINGS 解析失败，回退默认映射: %v", err)
+		} else if len(parsed) > 0 {
+			cfg.Mappings = parsed
+		}
+	}
+
+	// 故障转移链：默认 cloudflare → google → adguard（全部海外可达且无过滤差异主嫌时可用）。
+	// 必须在 DOMAIN_MAPPINGS 覆盖之后再校验，否则自定义映射里的上游名会被误判不在映射表而丢弃
 	chain := strings.TrimSpace(os.Getenv("FAILOVER_CHAIN"))
 	if chain == "" {
 		chain = "cloudflare,google,adguard"
@@ -181,15 +191,6 @@ func loadConfig() Config {
 			} else {
 				log.Printf("FAILOVER_CHAIN 里的 %q 不在映射表中，忽略", name)
 			}
-		}
-	}
-
-	if raw := strings.TrimSpace(os.Getenv("DOMAIN_MAPPINGS")); raw != "" {
-		var parsed map[string]Mapping
-		if err := json.Unmarshal([]byte(raw), &parsed); err != nil {
-			log.Printf("DOMAIN_MAPPINGS 解析失败，回退默认映射: %v", err)
-		} else if len(parsed) > 0 {
-			cfg.Mappings = parsed
 		}
 	}
 
@@ -888,6 +889,8 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		usedURL   = target
 		lastErr   error
 		gotStatus int
+		cacheable []byte
+		readBuf   []byte
 	)
 	for _, cand := range s.candidates(provider) {
 		attemptURL := target
@@ -914,6 +917,10 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		req.Header.Del("Host")
 		req.Header.Del("Content-Length")
+		// Accept-Encoding 也不能透传：transport 只对「自己加的」gzip 做透明解压，
+		// 克隆客户端的会导致压缩应答原样进缓存，未带该头的客户端命中后拿到压缩体无法解析。
+		// 剥掉后由 transport 自行协商，缓存恒存 identity 字节（与边缘版语义一致）。
+		req.Header.Del("Accept-Encoding")
 		// 始终显式设置长度，避免 chunked 转发被部分 DoH 上游拒绝
 		req.ContentLength = int64(len(bodyBuf))
 
@@ -934,6 +941,26 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			continue
 		}
 		s.healthFor(cand).record(true)
+
+		// 可缓存响应先整段读出（DoH 应答极小），顺便落缓存。
+		// 多读 1 字节用于检测截断：超出上限时不能只写截断体——客户端会按上游
+		// Content-Length 挂起等剩余字节——改为把已读部分连同剩余一起写完。
+		// 读体失败（上游中途断流）记该上游失败并继续候选链（对齐边缘版行为）
+		if cacheKey != "" && resp.StatusCode == http.StatusOK {
+			buf, readErr := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
+			if readErr != nil {
+				resp.Body.Close()
+				s.healthFor(cand).record(false)
+				lastErr = readErr
+				resp = nil
+				continue
+			}
+			readBuf = buf
+			if len(readBuf) <= maxBodyBytes {
+				cacheable = readBuf
+				s.storeCache(cacheKey, cacheable, resp.Header.Get("Content-Type"))
+			}
+		}
 		usedURL = attemptURL
 		break
 	}
@@ -952,33 +979,6 @@ func (s *server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	defer resp.Body.Close()
-
-	// 可缓存响应先整段读出（DoH 应答极小），顺便落缓存。
-	// 多读 1 字节用于检测截断：超出上限时不能只写截断体——客户端会按上游
-	// Content-Length 挂起等剩余字节——改为把已读部分连同剩余一起写完。
-	var (
-		cacheable []byte
-		readBuf   []byte
-		readDone  bool
-		readErr   error
-	)
-	if cacheKey != "" && resp.StatusCode == http.StatusOK {
-		readBuf, readErr = io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
-		if readErr == nil {
-			readDone = len(readBuf) <= maxBodyBytes
-			if readDone {
-				cacheable = readBuf
-				s.storeCache(cacheKey, cacheable, resp.Header.Get("Content-Type"))
-			}
-		}
-	}
-	if readErr != nil {
-		// 响应体读失败（上游中途断流），此时响应头还未写出，直接按上游错误处理
-		s.totalErr.Add(1)
-		resp.Body.Close()
-		http.Error(w, "upstream error", http.StatusBadGateway)
-		return
-	}
 
 	for k, vv := range resp.Header {
 		for _, v := range vv {

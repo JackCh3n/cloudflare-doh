@@ -127,7 +127,7 @@ export const HOMEPAGE_HTML = `<!DOCTYPE html>
 </html>`;
 
 /** 需要剥离的请求头（由运行时或目标域名自行决定） */
-const DROPPED_REQUEST_HEADERS = ['host', 'content-length'];
+const DROPPED_REQUEST_HEADERS = ['host', 'content-length', 'accept-encoding'];
 
 /** hop-by-hop 头：逐跳语义，不应透传（对齐 Go 版 hopHeaders） */
 const HOP_BY_HOP_HEADERS = [
