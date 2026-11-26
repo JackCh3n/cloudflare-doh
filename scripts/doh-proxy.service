@@ -30,9 +30,9 @@ Environment=METRICS_PATH=/metrics   # 运行指标（在途数/累计请求/上�
 
 # 应答缓存与上游熔断
 Environment=CACHE_MAX_TTL=300       # 单条缓存最长 300s（同时限制记录 TTL 上限），0=关闭
-Environment=CACHE_ENTRIES=10000     # LRU 条目上限（约几 MB）
+Environment=CACHE_ENTRIES=10000     # LRU 条目上限（另有 64 MiB 总字节上限）
 Environment=CB_THRESHOLD=5          # 连续 5 次失败熔断
-Environment=CB_COOLDOWN_SEC=30      # 熔断冷却 30s，之后放行一次探测
+Environment=CB_COOLDOWN_SEC=30      # 熔断冷却 30s，之后恢复尝试（上游 5xx / 429 或连接失败都计失败）
 Environment=FAILOVER_CHAIN=cloudflare,google,adguard
 
 # cgroup 硬护栏：即使 Go 运行时失控也不会拖垮整机

@@ -20,7 +20,7 @@
 - **参数与请求体完整透传**：保留查询串，支持 DoH 的 GET 与 POST（`application/dns-message` 二进制体）
 - **路径映射可配置**：可用环境变量 `DOMAIN_MAPPINGS` 覆盖，也可以直接改默认映射
 - **伪装 404**：未命中映射的路径（含站点根路径）返回一个「浏览器断网」样式的 404 页面，不暴露代理特征
-- **应答缓存与熔断转移（v1.5.0 起，三端一致）**：进程内 LRU 缓存热门查询（键不含事务 ID，POST 也命中，命中时改写 ID 并按存活时间递减 TTL、跳过 OPT）；上游连续失败熔断、按 `FAILOVER_CHAIN` 同请求内无缝转移，全部不可用时 502/503 + Retry-After
+- **应答缓存与熔断转移（v1.5.0 起，三端一致）**：进程内 LRU 缓存热门查询（键不含事务 ID，POST 也命中，命中时改写 ID 并按存活时间递减 TTL、跳过 OPT；只缓存确认属于该查询、未截断的完整 DNS 应答；缓存里恒为未压缩的应答）；上游连接失败（含应答中途断流）、返回 `5xx` 或 `429` 限流时连续失败即熔断，按 `FAILOVER_CHAIN` 同请求内无缝转移，全部不可用时 502/503 + Retry-After
 
 ## 目录结构
 
@@ -32,8 +32,8 @@ cloudflare-doh/
 ├── src/
 │   └── core.js           # 共享核心：默认映射、路径解析、代理转发、伪装 404
 ├── server/               # Go 版实现（自建服务器 + EdgeOne 加速），见 server/README.md
-│   ├── main.go           # 单文件服务：路由、转发、白名单、缓存头、优雅退出
-│   ├── main_test.go      # 单元测试（映射/白名单/伪装 404/缓存策略/裸路径）
+│   ├── main.go           # 单文件服务：路由、转发、白名单、应答缓存、熔断转移、优雅退出
+│   ├── *_test.go         # 单元与回归测试（路由 / 缓存 / 熔断 / TLS / 配置）
 │   ├── go.mod
 │   └── README.md
 ├── test/
@@ -127,9 +127,9 @@ v1.5.0 起三端能力对齐，差异只剩运行时模型：
 | `CACHE_TTL` | `GET + application/dns-message` 响应的缓存秒数（响应头，供浏览器/CDN 用）；`0` 表示完全不缓存 | `0` |
 | `DEFAULT_UPSTREAM` | 裸路径（`/`、`/dns-query`、`/query-dns`）兜底走哪家上游 | `cloudflare` |
 | `CACHE_MAX_TTL` | 进程内应答缓存单条最长保留秒数（同时限制记录 TTL 上限），`0` = 关闭 | `300` |
-| `CACHE_ENTRIES` | 进程内缓存 LRU 条目上限 | `10000` |
+| `CACHE_ENTRIES` | 进程内缓存 LRU 条目上限（另有 64 MiB 总字节上限） | `10000` |
 | `CB_THRESHOLD` | 上游连续失败多少次触发熔断 | `5` |
-| `CB_COOLDOWN_SEC` | 熔断冷却秒数，到期后放行探测 | `30` |
+| `CB_COOLDOWN_SEC` | 熔断冷却秒数，到期后恢复尝试 | `30` |
 | `FAILOVER_CHAIN` | 首选上游熔断后按序转移的其它上游，逗号分隔（空 = 禁用转移） | `cloudflare,google,adguard` |
 | `HEALTH_PATH` | 健康检查路径，命中返回 200 ok；空 = 关闭 | 空 |
 | `METRICS_PATH` | 运行指标 JSON（累计请求/上游错误/缓存命中/各上游健康），空 = 关闭 | 空 |
@@ -356,7 +356,7 @@ sudo ALLOWED_HOSTS=doh.example.com bash deploy-linux.sh
 
 #### GitHub Releases 二进制（CI 构建，版本号驱动）
 
-**每次推送 `main` 都会构建并发版**——不存在“小修不发版”。流程：CI 读取 `package.json` 的 `version`（按规则每次提交递增），若该版本的 tag `vX.Y.Z` 尚不存在，就自动打 tag → 发 Release → 推版本化镜像；版本未变的推送（如纯文档）只跑测试并刷新 `edge` 镜像。手动 `git tag vX.Y.Z && git push origin vX.Y.Z` 也走同一发布路径。
+**版本号驱动发版**：每次推送 `main` 时 CI 读取 `package.json` 的 `version`（版本号只在发布时变更），若该版本的 tag `vX.Y.Z` 尚不存在，就自动打 tag → 发 Release → 推版本化镜像；版本未变的推送（如纯文档、未升版的提交）只跑测试并刷新 `edge` 镜像，不重复发版。手动 `git tag vX.Y.Z && git push origin vX.Y.Z` 也走同一发布路径。
 
 | 产物 | 说明 |
 | --- | --- |
@@ -364,7 +364,7 @@ sudo ALLOWED_HOSTS=doh.example.com bash deploy-linux.sh
 | `doh-proxy-windows-amd64.exe` | Windows 本地调试用 |
 | `SHA256SUMS` | 全部产物的 sha256 校验（`deploy-linux.sh` 会自动校验） |
 
-CI 还会先跑 `node test/smoke.mjs`（边缘版 48 项）与 `go vet && go test`，任一失败则不出产物。
+CI 还会先跑 `node test/smoke.mjs`（边缘版冒烟测试）与 `go vet && go test`，任一失败则不出产物。发布产物都编入了版本号：`./doh-proxy -version`、启动日志与 `/metrics` 的 `version` 字段都能看到；本地直接 `go build` 的是 `dev`。
 
 下载地址（`deploy-linux.sh` 默认来源）：
 
@@ -374,7 +374,7 @@ https://github.com/JackCh3n/cloudflare-doh/releases/latest/download/doh-proxy-li
 
 #### Docker 部署
 
-每次推送 `main` 自动构建多架构镜像（linux/amd64 + linux/arm64）发布到 GHCR，标签：`X.Y.Z`、`X.Y`、`latest`（发版时）、`edge`（每次 main 推送）、`sha-<短哈希>`。CNB 侧（`docker.cnb.cool/jackch3n/cloudflare-doh`）同样按 `package.json` 版本出 `X.Y.Z` / `X.Y` / `latest` / `<分支名>` 标签：
+每次推送 `main` 自动构建多架构镜像（linux/amd64 + linux/arm64）发布到 GHCR，标签：`X.Y.Z`、`X.Y`、`latest`（发版时）、`edge`（每次 main 推送）、`sha-<短哈希>`。CNB 侧（`docker.cnb.cool/jackch3n/cloudflare-doh`）：推送 `main` 出 `X.Y.Z` / `X.Y` / `latest`，推送 `vX.Y.Z` 标签出 `vX.Y.Z` / `X.Y.Z` / `X.Y` / `latest`；其它分支只出 `<分支名>`，功能分支不会用未发布的代码覆盖已发布的镜像。
 
 ```bash
 # 最简启动（HTTP :8080，TLS 交给前置 CDN/反代终结）
