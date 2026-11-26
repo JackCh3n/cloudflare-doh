@@ -180,4 +180,6 @@ dist
 
 # EdgeOne 手动上传打包产物
 dist/
+
+# ZCode 本地工作区数据（记忆/缓存）
 .zcode/
