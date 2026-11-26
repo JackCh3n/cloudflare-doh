@@ -39,7 +39,8 @@ cloudflare-doh/
 ├── test/
 │   ├── smoke.mjs               # 零依赖冒烟测试（node test/smoke.mjs）
 │   ├── capture-camo-shots.mjs  # 无头浏览器设备模拟，采集伪装页四态截图
-│   └── verify-camo-shots.mjs   # 伪装页截图验证：采集 + 解码 + 坐标/色值断言
+│   ├── verify-camo-shots.mjs   # 伪装页截图验证：采集 + 解码 + 坐标/色值断言
+│   └── compare-camo-chrome.mjs # 伪装页 ↔ 本机 Chrome 真实错误页：布局 / 像素 / 多语言文案对照
 ├── scripts/
 │   ├── dev.bat           # 本地调试：杀旧进程 → 装依赖 → 启动 → 打开浏览器
 │   ├── kill-dev.bat      # 结束占用 8787/8088/6699 的调试进程
@@ -428,12 +429,15 @@ https://dohj.example.com/cloudflare/query-dns
 ```bash
 npm test          # 零依赖冒烟测试，覆盖映射解析/头部剥离/POST 透传/双平台入口/伪装页守卫
 npm run test:camo # 伪装页截图验证：无头 Chrome/Edge 设备模拟拍四态，按坐标与色值断言（Node ≥ 22）
+npm run camo:chrome # 伪装页 ↔ 本机 Chrome 真实错误页对照：布局 60 种视口 + 7 张截图像素 + 12 种语言文案
 npm run camo:sync # 改了 index.html 后，把伪装页同步到 src/core.js 与 server/main.go
 npm run dev       # Cloudflare 本地调试（wrangler dev，默认 8787）
 scripts\dev.bat   # Windows 一键调试（杀旧进程 → 装依赖 → 启动 → 打开浏览器）
 ```
 
 伪装页只改 `index.html`（唯一来源），改完执行 `npm run camo:sync`；冒烟测试会守住三处副本一致以及嵌入约束（不能出现反引号、`${`、反斜杠）。`npm run test:camo` 默认验证的是 `src/core.js` 里**求值后**的页面，也就是 Worker / EdgeOne 实际发出去的那一份；要验证运行中的 Go 代理或线上站点，带上 `--url`：`node test/verify-camo-shots.mjs --url https://doh.example.com/`。
+
+伪装页是照着 Chrome 的 DNS 错误页做的，Chrome 改版之后它就会「变旧」。`npm run camo:chrome` 用本机安装的 Chrome / Edge 触发一个真实的错误页，与伪装页在**同一个地址**上逐项对照：60 种视口下的元素坐标与计算样式、7 张截图（浅 / 深色 × 桌面 / 手机、125% 缩放、高对比度）逐像素、抽样 12 种界面语言的文案。有差异时列出差在哪个视口、哪个元素、哪个属性，并把两侧截图存到系统临时目录供肉眼比对（退出码 1）；全程约一分钟。Chrome 升级后跑一次，就知道伪装页哪里要跟着改；`--languages all` 检查伪装页收录的全部语言。前提是所在网络对不存在的域名返回「不存在」——被解析劫持或浏览器走代理时真实错误页触发不了，脚本会说明原因后退出。
 
 EdgeOne 侧：
 

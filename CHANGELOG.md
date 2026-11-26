@@ -37,6 +37,7 @@
 - Go / 边缘版：上游返回 `429`（限流）视为不可用并转移；裸路径与故障转移的目标路径跟随 `pathMapping`（端点不在 `/dns-query` 的上游也能用）
 - Go 版新增版本号：`doh-proxy -version`、启动日志、`/metrics` 的 `version` 字段；`/metrics` 新增 `cache_bytes` / `cache_max_bytes`
 - 新增 `npm run camo:sync`（伪装页三处同步）与 `npm run test:camo`（无头浏览器设备模拟截图验证；原 `--window-size=375,667` 的做法在 Windows 上拍不到手机布局，压扁的图标也能通过）
+- 新增 `npm run camo:chrome`：伪装页 ↔ 本机 Chrome 真实错误页对照（60 种视口的布局、7 张截图逐像素、多语言文案）；Chrome 改版后用它量出伪装页哪里要跟着改
 
 ### 构建与发布
 

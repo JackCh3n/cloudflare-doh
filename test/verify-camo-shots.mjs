@@ -8,6 +8,10 @@
  *   2. 解码截图，按坐标与色值断言
  *   验证运行中的 Go 代理或线上站点：node test/verify-camo-shots.mjs --url <页面地址>
  *   验证现成的四张截图：node test/verify-camo-shots.mjs <light> <dark> <phone-light> <phone-dark>
+ *   （Node ≥ 22：采集用到内置 WebSocket）
+ *
+ * 这里只回答「伪装页的坐标与色值对不对」；要回答「和本机 Chrome 的真实错误页像不像」，
+ * 用 test/compare-camo-chrome.mjs（npm run camo:chrome）。
  *
  * 断言依据是 Chrome 157（Windows）真实 DNS 错误页的实测结果：
  *   - 桌面 1280x800：内容列 600px 居中（左缘 x=340），图标盒 72x72 在 (340,112)，
@@ -26,7 +30,7 @@ import { fileURLToPath } from 'node:url';
 import { SHOT_STATES, captureCamoShots } from './capture-camo-shots.mjs';
 
 /** 解码 8-bit PNG（支持彩色类型 2/6），返回 {width, height, get(x,y)->[r,g,b]} */
-function decodePng(buf) {
+export function decodePng(buf) {
 	assert.equal(buf.readUInt32BE(0), 0x89504e47, 'PNG 魔数');
 	let pos = 8;
 	let width = 0, height = 0, bitDepth = 0, colorType = 0;
