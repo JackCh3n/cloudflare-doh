@@ -3,7 +3,8 @@
  *
  * 直接运行：node test/smoke.mjs
  * 覆盖：路径映射解析、转发目标拼接、请求头剥离、POST 请求体透传、
- *       最长前缀匹配、DOMAIN_MAPPINGS 覆盖、两个平台入口的基本可用性。
+ *       最长前缀匹配、DOMAIN_MAPPINGS 覆盖、两个平台入口的基本可用性、
+ *       路径重写与裸路径端点、读体/上游异常、hop-by-hop 头处理。
  * 说明：不发起真实外网请求，统一用注入的 fetchImpl 桩函数断言转发参数。
  */
 
@@ -209,10 +210,11 @@ await check('默认给上游响应加 no-store（避免 Workers Cache 启发式�
 	assert.equal(response.headers.get('cache-control'), 'no-store');
 });
 
-await check('伪装 404 带 no-store', async () => {
+await check('伪装 404 带 no-store 与 nosniff', async () => {
 	const response = await proxyRequest(new Request('https://x.dev/unknown'), { fetchImpl: () => { throw new Error('不应发起请求'); } });
 	assert.equal(response.status, 404);
 	assert.equal(response.headers.get('cache-control'), 'no-store');
+	assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
 });
 
 await check('CACHE_TTL>0 时仅缓存 GET + dns-message，并带 Vary: Accept', async () => {
@@ -302,6 +304,122 @@ await check('EdgeOne 中间件入口可从 context 读取 request/env', async ()
 	} finally {
 		globalThis.fetch = original;
 	}
+});
+
+// ==================== 路径重写与裸路径 ====================
+
+await check('pathMapping 最长规则优先，目标串里的 $ 不当成替换模式', () => {
+	const env = {
+		DOMAIN_MAPPINGS: {
+			'/demo': { targetDomain: 'demo.doh.cn', pathMapping: { '/query-dns': '/a', '/query-dns-v2': '/b' } },
+			'/dollar': { targetDomain: 'dollar.doh.cn', pathMapping: { '/query-dns': '/$&x' } },
+		},
+	};
+	// 原先按对象键顺序取第一条命中的规则，/query-dns-v2 会被 /query-dns 抢走
+	assert.equal(resolveTarget(new URL('https://x.dev/demo/query-dns-v2/d'), env).targetUrl, 'https://demo.doh.cn/b/d');
+	assert.equal(resolveTarget(new URL('https://x.dev/demo/query-dns'), env).targetUrl, 'https://demo.doh.cn/a');
+	// $& 在 String.replace 里表示「整个匹配」，原先会被展开成 /query-dns
+	assert.equal(resolveTarget(new URL('https://x.dev/dollar/query-dns?dns=abc'), env).targetUrl, 'https://dollar.doh.cn/$&x?dns=abc');
+});
+
+await check('DEFAULT_UPSTREAM 大小写不敏感', () => {
+	assert.equal(
+		resolveTarget(new URL('https://x.dev/dns-query?dns=abc'), { DEFAULT_UPSTREAM: 'GOOGLE' }).targetUrl,
+		'https://dns.google/dns-query?dns=abc'
+	);
+	assert.equal(
+		resolveTarget(new URL('https://x.dev/dns-query?dns=abc'), { DEFAULT_UPSTREAM: '/AdGuard' }).targetUrl,
+		'https://dns.adguard-dns.com/dns-query?dns=abc'
+	);
+});
+
+await check('裸路径的目标路径跟随 pathMapping（端点不在 /dns-query 的上游也能用）', () => {
+	// dns.nextdns.io/<profile>：显式前缀 /nd/query-dns 能打到，裸路径原先却固定打到不存在的 /dns-query
+	const env = {
+		DEFAULT_UPSTREAM: 'nd',
+		DOMAIN_MAPPINGS: { '/nd': { targetDomain: 'dns.nextdns.io', pathMapping: { '/query-dns': '/abc123' } } },
+	};
+	assert.equal(resolveTarget(new URL('https://x.dev/nd/query-dns'), env).targetUrl, 'https://dns.nextdns.io/abc123');
+	assert.equal(resolveTarget(new URL('https://x.dev/dns-query?dns=abc'), env).targetUrl, 'https://dns.nextdns.io/abc123?dns=abc');
+	// 没有映射时端点仍是 /dns-query；/dns-query 的映射优先于 /query-dns
+	assert.equal(resolveTarget(new URL('https://x.dev/dns-query'), { DEFAULT_UPSTREAM: 'google' }).targetUrl, 'https://dns.google/dns-query');
+	assert.equal(
+		resolveTarget(new URL('https://x.dev/dns-query'), {
+			DEFAULT_UPSTREAM: 'nd',
+			DOMAIN_MAPPINGS: {
+				'/nd': { targetDomain: 'dns.nextdns.io', pathMapping: { '/query-dns': '/from-query-dns', '/dns-query': '/from-dns-query' } },
+			},
+		}).targetUrl,
+		'https://dns.nextdns.io/from-dns-query'
+	);
+});
+
+// ==================== 异常与头部处理 ====================
+
+await check('请求体读取失败返回 400，而不是未处理的拒绝', async () => {
+	const req = new Request('https://x.dev/cloudflare/query-dns', {
+		method: 'POST',
+		headers: { 'content-type': 'application/dns-message' },
+		body: new Uint8Array([1, 2, 3]),
+	});
+	await req.body.cancel(); // 模拟客户端中断，使 arrayBuffer() reject
+	const response = await proxyRequest(req, {
+		fetchImpl: () => {
+			throw new Error('不应发起请求');
+		},
+	});
+	assert.equal(response.status, 400);
+	assert.equal(response.headers.get('cache-control'), 'no-store');
+	assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+});
+
+await check('上游网络错误返回 502 + Retry-After，不向上抛异常', async () => {
+	const response = await proxyRequest(new Request('https://x.dev/google/query-dns?name=a.com'), {
+		fetchImpl: () => {
+			throw new Error('connection refused');
+		},
+	});
+	assert.equal(response.status, 502);
+	assert.equal(response.headers.get('retry-after'), '2');
+	assert.equal(response.headers.get('cache-control'), 'no-store');
+	assert.equal(response.headers.get('x-content-type-options'), 'nosniff');
+	assert.match(await response.text(), /upstream error/);
+});
+
+await check('hop-by-hop 请求头不透传给上游，accept-encoding 由运行时自管', async () => {
+	const req = new Request('https://x.dev/google/query-dns?name=a.com', {
+		headers: { accept: 'application/dns-json', connection: 'keep-alive', te: 'trailers', host: 'x.dev', 'accept-encoding': 'gzip, br' },
+	});
+	// 前置：这些头确实进了请求（否则下面的断言测不到剥离逻辑）
+	assert.equal(req.headers.get('connection'), 'keep-alive');
+	assert.equal(req.headers.get('accept-encoding'), 'gzip, br');
+	const stub = createFetchStub();
+	await proxyRequest(req, { env: {}, fetchImpl: stub });
+	assert.equal(stub.calls[0].init.headers.get('connection'), null);
+	assert.equal(stub.calls[0].init.headers.get('te'), null);
+	assert.equal(stub.calls[0].init.headers.get('host'), null);
+	// 透传 accept-encoding 时压缩应答由运行时透明解压，转发出去的 Content-Encoding / Content-Length 头可能与正文对不上
+	assert.equal(stub.calls[0].init.headers.get('accept-encoding'), null);
+	assert.equal(stub.calls[0].init.headers.get('accept'), 'application/dns-json');
+});
+
+await check('上游响应的 hop-by-hop 头被剥离，其它头与 set-cookie 保留', async () => {
+	const upstream = new Response('dns-binary', {
+		status: 200,
+		headers: { 'content-type': 'application/dns-message', connection: 'keep-alive', 'keep-alive': 'timeout=5', 'set-cookie': 'a=1', 'x-upstream': 'yes' },
+	});
+	// 前置：桩的响应确实带了这些头
+	assert.equal(upstream.headers.get('connection'), 'keep-alive');
+	const response = await proxyRequest(new Request('https://x.dev/google/query-dns?dns=abc', { headers: { accept: 'application/dns-message' } }), {
+		env: {},
+		fetchImpl: createFetchStub(upstream),
+	});
+	assert.equal(response.status, 200);
+	assert.equal(response.headers.get('connection'), null);
+	assert.equal(response.headers.get('keep-alive'), null);
+	assert.equal(response.headers.get('set-cookie'), 'a=1');
+	assert.equal(response.headers.get('x-upstream'), 'yes');
+	assert.equal(await response.text(), 'dns-binary');
 });
 
 console.log(`\n通过 ${passed} 项，失败 ${failures.length} 项`);

@@ -105,7 +105,19 @@ export const HOMEPAGE_HTML = `<!DOCTYPE html>
 </html>`;
 
 /** 需要剥离的请求头（由运行时或目标域名自行决定） */
-const DROPPED_REQUEST_HEADERS = ['host', 'content-length'];
+const DROPPED_REQUEST_HEADERS = ['host', 'content-length', 'accept-encoding'];
+
+/** hop-by-hop 头：逐跳语义，不应透传 */
+const HOP_BY_HOP_HEADERS = [
+	'connection',
+	'keep-alive',
+	'proxy-authenticate',
+	'proxy-authorization',
+	'te',
+	'trailer',
+	'transfer-encoding',
+	'upgrade',
+];
 
 /**
  * 读取主机白名单
@@ -180,19 +192,36 @@ export function getPathMappings(env) {
 const BARE_DOH_PATHS = ['/dns-query', '/query-dns'];
 
 /**
+ * 上游的 DoH 端点路径。裸路径打这里。
+ * pathMapping 把 /dns-query 或 /query-dns 映射到别处，说明端点不在标准位置
+ * （例如 dns.nextdns.io/<profile>），必须跟着映射走，否则会打到上游不存在的 /dns-query
+ * @param {Object} mapping 一条映射
+ * @returns {string}
+ */
+export function dohEndpointPath(mapping) {
+	const pathMapping = (mapping && mapping.pathMapping) || {};
+	for (const source of BARE_DOH_PATHS) {
+		const dest = pathMapping[source];
+		if (dest) return `/${String(dest).replace(/^\/+/, '')}`;
+	}
+	return '/dns-query';
+}
+
+/**
  * 构造「无路径前缀」的默认 DoH 目标
  * @param {URL} url
  * @param {Object} [env]
  * @returns {{prefix: string, targetDomain: string, targetUrl: string}|null}
  */
 export function bareDohTarget(url, env) {
-	const name = String((env && env.DEFAULT_UPSTREAM) || 'cloudflare').replace(/^\/+/, '');
+	// 小写归一，避免 DEFAULT_UPSTREAM 写成大写时查不到映射而 404
+	const name = String((env && env.DEFAULT_UPSTREAM) || 'cloudflare').replace(/^\/+/, '').toLowerCase();
 	const mapping = getPathMappings(env)[`/${name}`];
 	if (!mapping || !mapping.targetDomain) return null;
 	return {
 		prefix: '/',
 		targetDomain: mapping.targetDomain,
-		targetUrl: `https://${mapping.targetDomain}/dns-query${url.search}`,
+		targetUrl: `https://${mapping.targetDomain}${dohEndpointPath(mapping)}${url.search}`,
 	};
 }
 
@@ -236,10 +265,13 @@ export function resolveTarget(url, env) {
 	const remainingPath = path.substring(pathPrefix.length);
 	const pathMapping = mapping.pathMapping || {};
 
+	// 按键长度倒序匹配，保证最长匹配；只做「前缀」重写——
+	// 原先的 String.replace 只替换第一处，且会把目标串里的 $ 当成特殊替换模式
 	let targetPath = remainingPath;
-	for (const [sourcePath, destPath] of Object.entries(pathMapping)) {
+	const rewriteRules = Object.entries(pathMapping).sort((a, b) => b[0].length - a[0].length);
+	for (const [sourcePath, destPath] of rewriteRules) {
 		if (remainingPath.startsWith(sourcePath)) {
-			targetPath = remainingPath.replace(sourcePath, destPath);
+			targetPath = destPath + remainingPath.slice(sourcePath.length);
 			break;
 		}
 	}
@@ -267,23 +299,38 @@ export function camoResponse() {
 			'Content-Type': 'text/html; charset=utf-8',
 			// 显式禁止缓存：否则 Workers Cache 会按启发式给 404 缓存 3 分钟
 			'Cache-Control': 'no-store',
+			'X-Content-Type-Options': 'nosniff',
 		},
 	});
 }
 
 /**
- * 复制请求头，剥离由运行时接管或会引起歧义的头部
+ * 复制请求头，剥离由运行时接管、会引起歧义或 hop-by-hop 的头部
  * @param {Headers} headers
  * @returns {Headers}
  */
 function forwardableHeaders(headers) {
 	const result = new Headers();
 	headers.forEach((value, key) => {
-		if (!DROPPED_REQUEST_HEADERS.includes(key.toLowerCase())) {
+		const lower = key.toLowerCase();
+		if (!DROPPED_REQUEST_HEADERS.includes(lower) && !HOP_BY_HOP_HEADERS.includes(lower)) {
 			result.set(key, value);
 		}
 	});
 	return result;
+}
+
+/** 纯文本应答（错误响应用；no-store + nosniff） */
+function plainResponse(status, text, extraHeaders = {}) {
+	return new Response(text, {
+		status,
+		headers: {
+			'Content-Type': 'text/plain; charset=utf-8',
+			'Cache-Control': 'no-store',
+			'X-Content-Type-Options': 'nosniff',
+			...extraHeaders,
+		},
+	});
 }
 
 /**
@@ -323,19 +370,41 @@ export async function proxyRequest(request, options = {}) {
 		redirect: 'follow',
 	};
 
-	// GET/HEAD 无请求体；其余方法统一读取为 ArrayBuffer，兼容各 V8 运行时对流式 body 的差异
+	// GET/HEAD 无请求体；其余方法统一读取为 ArrayBuffer，兼容各 V8 运行时对流式 body 的差异。
+	// 读体失败（客户端中途断开）返回 400，不让未处理的拒绝变成平台的错误页
 	if (method !== 'GET' && method !== 'HEAD') {
-		const body = await request.arrayBuffer();
+		let body;
+		try {
+			body = await request.arrayBuffer();
+		} catch (error) {
+			return plainResponse(400, 'bad request body');
+		}
 		if (body && body.byteLength > 0) {
 			init.body = body;
 		}
 	}
 
-	const upstream = await fetchImpl(target.targetUrl, init);
+	// 上游网络错误（解析失败 / 连接被拒 / 握手失败）：返回 502，不让异常冒泡成平台的错误页
+	let upstream;
+	try {
+		upstream = await fetchImpl(target.targetUrl, init);
+	} catch (error) {
+		return plainResponse(502, 'upstream error\n', { 'Retry-After': '2' });
+	}
 
 	// 显式声明缓存策略（Workers Cache 开启后必需，见 cachePolicy 注释）
+	// 响应头：复制上游 → 剥 hop-by-hop → 覆盖缓存策略（set-cookie 用 append 保留多条）
 	const policy = cachePolicy(request, env);
-	const headers = new Headers(upstream.headers);
+	const headers = new Headers();
+	upstream.headers.forEach((value, key) => {
+		const lower = key.toLowerCase();
+		if (HOP_BY_HOP_HEADERS.includes(lower)) return;
+		if (lower === 'set-cookie') {
+			headers.append(key, value);
+		} else {
+			headers.set(key, value);
+		}
+	});
 	headers.set('Cache-Control', policy.value);
 	if (policy.vary) {
 		const vary = headers.get('Vary');
@@ -352,6 +421,7 @@ export async function proxyRequest(request, options = {}) {
 export default {
 	resolveTarget,
 	bareDohTarget,
+	dohEndpointPath,
 	isDohRequest,
 	getPathMappings,
 	getAllowedHosts,
