@@ -450,7 +450,7 @@ edgeone makers deploy -e preview   # 部署到预览环境验证
 
 ### 线上自检（真实 DoH 查询）
 
-`scripts/check-doh.mjs` 会对指定站点逐个上游发真实 `POST application/dns-message` 查询，解析应答并打印 A 记录，用来确认「转发真的能出结果」而不只是「页面上有点东西」。
+`scripts/check-doh.mjs` 会对指定站点逐个上游发真实 `POST application/dns-message` 查询，解析应答并打印 A 记录，用来确认「转发真的能出结果」而不只是「页面上有点东西」。应答不是合法 DNS 报文（门户 / 错误页、JSON、被截断）、连接中途断开、超时，都会给出对应的失败结论，不会中途崩溃或卡住。
 
 ```bash
 # 自定义域名（证书还没签发时加 --insecure，本地 DNS 解析不到时加 --ip 直连）
